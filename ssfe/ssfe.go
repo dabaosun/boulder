@@ -2,13 +2,14 @@ package ssfe
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
-	"html/template"
+	"io/fs"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/jmhodges/clock"
@@ -30,14 +31,22 @@ import (
 	"github.com/letsencrypt/boulder/web"
 )
 
-// Paths are the ACME-spec identified URL path-segments for various methods.
-// NOTE: In metrics/measured_http we make the assumption that these are all
-// lowercase plus hyphens. If you violate that assumption you should update
-// measured_http.
-const (
-	unpausePath = "/unpause"
-	buildIDPath = "/build"
+var (
+	//go:embed all:static
+	staticFS embed.FS
+
+	//go:embed all:templates
+	templateFS embed.FS
 )
+
+var renderedIndex, renderedUnpause *template.Template
+
+// Parse the files once at startup to avoid each request causing the server to
+// JIT parse.
+func init() {
+	renderedIndex = template.Must(template.New("index").ParseFS(templateFS, "templates/index/*.html", "templates/*.html"))
+	renderedUnpause = template.Must(template.New("unpause").ParseFS(templateFS, "templates/unpause/*.html", "templates/*.html"))
+}
 
 const (
 	headerRetryAfter = "Retry-After"
@@ -167,78 +176,48 @@ func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern stri
 	mux.Handle(pattern, handler)
 }
 
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	renderTemplate(w, renderedIndex)
+}
+
+func unpauseHandler(w http.ResponseWriter, r *http.Request) {
+	renderTemplate(w, renderedUnpause)
+}
+
+func renderTemplate(w http.ResponseWriter, tmpl *template.Template) {
+	if tmpl == nil {
+		http.Error(w, "Template does not exist", http.StatusInternalServerError)
+		return
+	}
+
+	err := tmpl.ExecuteTemplate(w, "layout", nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func makeHandler(fn func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fn(w, r)
+	}
+}
+
 // Handler returns an http.Handler that uses various functions for
 // various ACME-specified paths.
 func (ssfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
 	m := http.NewServeMux()
 
-	// Serve our static files
-	fs := http.FileServer(http.Dir("./static"))
-	m.Handle("/static/", http.StripPrefix("/static/", fs))
+	static, _ := fs.Sub(staticFS, "static")
+	handler := http.StripPrefix("/static/", http.FileServer(http.FS(static)))
+	m.Handle("/static/", handler)
 
-	ssfe.HandleFunc(m, buildIDPath, ssfe.BuildID, "GET")
-	ssfe.HandleFunc(m, unpausePath, ssfe.Unpause, "GET", "POST")
+	m.HandleFunc("/", makeHandler(indexHandler))
+	m.HandleFunc("/unpause", makeHandler(unpauseHandler))
 
-	// We don't use our special HandleFunc for "/" because it matches everything,
-	// meaning we can wind up returning 405 when we mean to return 404. See
-	// https://github.com/letsencrypt/boulder/issues/717
-	m.Handle("/", web.NewTopHandler(ssfe.log, web.FrontEndHandlerFunc(ssfe.Index)))
+	ssfe.HandleFunc(m, "/build", ssfe.BuildID, "GET")
+	//ssfe.HandleFunc(m, "/unpause", ssfe.Unpause, "GET", "POST")
+
 	return measured_http.New(m, ssfe.clk, stats, oTelHTTPOptions...)
-}
-
-// Method implementations
-
-// Index serves a simple identification page. It is not part of the ACME spec.
-func (ssfe *SelfServiceFrontEndImpl) Index(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
-	// All requests that are not handled by our ACME endpoints ends up
-	// here. Set the our logEvent endpoint to "/" and the slug to the path
-	// minus "/" to make sure that we properly set log information about
-	// the request, even in the case of a 404
-	logEvent.Endpoint = "/"
-	logEvent.Slug = request.URL.Path[1:]
-
-	// http://golang.org/pkg/net/http/#example_ServeMux_Handle
-	// The "/" pattern matches everything, so we need to check
-	// that we're at the root here.
-	if request.URL.Path != "/" {
-		logEvent.AddError("Resource not found")
-		http.NotFound(response, request)
-		response.Header().Set("Content-Type", "application/problem+json")
-		return
-	}
-
-	if request.Method != "GET" {
-		response.Header().Set("Allow", "GET")
-		ssfe.sendError(response, logEvent, probs.MethodNotAllowed(), errors.New("Bad method"))
-		return
-	}
-
-	styleTemplate := filepath.Join("templates", "layout.tmpl")
-	slugTemplate := filepath.Join("templates", filepath.Clean(request.URL.Path))
-	renderedTemplate, err := template.ParseFiles(styleTemplate, slugTemplate)
-	if err != nil {
-		ssfe.log.Errf("%s\n", err)
-	}
-	renderedTemplate.ExecuteTemplate(response, "index", nil)
-
-	/*
-		fmt.Fprintln(response, `<html>
-			<head>
-				<title>Self-service Front End</title>
-			</head>
-			<body>
-				<p>
-					This is an <a href="https://tools.ietf.org/html/rfc8555">ACME</a>
-					Certificate Authority running <a href="https://github.com/letsencrypt/boulder">Boulder</a>.
-					However, this is not an <a href="https://tools.ietf.org/html/rfc8555">ACME</a> endpoint.
-				</p>
-				<p>
-					The <a href="https://letsencrypt.org/getting-started/">directory</a> is in another castle!
-				</p>
-			</body>
-		</html>
-		`)
-	*/
 }
 
 // sendError wraps web.SendError

@@ -1,0 +1,31 @@
+{{ define "body" }}
+<div>
+<p>This is the unpause endpoint</p>
+</div>
+
+<div class="wrapper">
+    <div class="buttonWrapper">
+        <button class="tab-button active" data-id="hostnames">Hostnames</button>
+        <button class="tab-button" data-id="accountID">AccountID</button>
+    </div>
+    <div class="contentWrapper">
+        <div class="content active" id="hostnames">
+            <form action="url-unimplemented" method="post">
+              <label for="fqdn">Enter hostnames (separated by whitespace):</label><br>
+              <textarea name="fqdn" rows=10 cols=80></textarea><br/>
+              <button class="primary" id="submit">Query</button>
+            </form>
+        </div>
+
+        <div class="content" id="accountID">
+            <form action="url-unimplemented" method="post">
+              <label for="accountID">Enter accountID:</label><br>
+              <textarea name="accountID" rows=10 cols=80></textarea><br/>
+              <button class="primary" id="submit">Query</button>
+            </form>
+        </div>
+    </div>
+</div>
+{{ end }}
+
+{{template "layout"}}
