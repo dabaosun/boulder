@@ -1,0 +1,24 @@
+{{define "layout"}}
+<!doctype html>
+<html dir="ltr" lang="en-US">
+    <head>
+        <title>{{template "title"}}</title>
+    
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    
+        <link href="https://fonts.googleapis.com/css?family=Nunito:300,400,600,700,800" rel="stylesheet">
+        <link rel="stylesheet" href="/static/main.css">
+    
+    </head>
+<body>
+	{{template "body"}}
+</body>
+    <footer>
+        <div>
+        <p>Let's Encrypt is a free, automated, and open certificate authority brought to you by the nonprofit <a href="https://www.abetterinternet.org/">Internet Security Research Group (ISRG)</a>.</p>
+        </div>
+    </footer>
+</html>
+{{end}}

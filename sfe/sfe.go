@@ -1,4 +1,4 @@
-package ssfe
+package sfe
 
 import (
 	"context"
@@ -7,25 +7,20 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"strconv"
-	"strings"
 	"text/template"
 	"time"
 
 	"github.com/jmhodges/clock"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/letsencrypt/boulder/core"
-	berrors "github.com/letsencrypt/boulder/errors"
 	"github.com/letsencrypt/boulder/ratelimits"
 
 	// 'grpc/noncebalancer' is imported for its init function.
 	_ "github.com/letsencrypt/boulder/grpc/noncebalancer"
 	blog "github.com/letsencrypt/boulder/log"
 	"github.com/letsencrypt/boulder/metrics/measured_http"
-	"github.com/letsencrypt/boulder/probs"
 	rapb "github.com/letsencrypt/boulder/ra/proto"
 	sapb "github.com/letsencrypt/boulder/sa/proto"
 	"github.com/letsencrypt/boulder/web"
@@ -35,8 +30,8 @@ var (
 	//go:embed all:static
 	staticFS embed.FS
 
-	//go:embed all:templates
-	templateFS embed.FS
+	//go:embed all:templates all:pages
+	dynamicFS embed.FS
 )
 
 var renderedIndex, renderedUnpause *template.Template
@@ -44,13 +39,9 @@ var renderedIndex, renderedUnpause *template.Template
 // Parse the files once at startup to avoid each request causing the server to
 // JIT parse.
 func init() {
-	renderedIndex = template.Must(template.New("index").ParseFS(templateFS, "templates/index/*.html", "templates/*.html"))
-	renderedUnpause = template.Must(template.New("unpause").ParseFS(templateFS, "templates/unpause/*.html", "templates/*.html"))
+	renderedIndex = template.Must(template.New("index").ParseFS(dynamicFS, "templates/layout.html", "pages/index.html"))
+	renderedUnpause = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause.html"))
 }
-
-const (
-	headerRetryAfter = "Retry-After"
-)
 
 var errIncompleteGRPCResponse = errors.New("incomplete gRPC response message")
 
@@ -87,7 +78,7 @@ func NewSelfServiceFrontEndImpl(
 	txnBuilder *ratelimits.TransactionBuilder,
 ) (SelfServiceFrontEndImpl, error) {
 
-	ssfe := SelfServiceFrontEndImpl{
+	sfe := SelfServiceFrontEndImpl{
 		log:            logger,
 		clk:            clk,
 		requestTimeout: requestTimeout,
@@ -97,9 +88,10 @@ func NewSelfServiceFrontEndImpl(
 		txnBuilder:     txnBuilder,
 	}
 
-	return ssfe, nil
+	return sfe, nil
 }
 
+/*
 // HandleFunc registers a handler at the given path. It's
 // http.HandleFunc(), but with a wrapper around the handler that
 // provides some generic per-request functionality:
@@ -118,7 +110,7 @@ func NewSelfServiceFrontEndImpl(
 // * Never send a body in response to a HEAD request. Anything
 // written by the handler will be discarded if the method is HEAD.
 // Also, all handlers that accept GET automatically accept HEAD.
-func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern string, h web.FrontEndHandlerFunc, methods ...string) {
+func (sfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern string, h web.FrontEndHandlerFunc, methods ...string) {
 	methodsMap := make(map[string]bool)
 	for _, m := range methods {
 		methodsMap[m] = true
@@ -129,7 +121,7 @@ func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern stri
 		methodsMap["HEAD"] = true
 	}
 	methodsStr := strings.Join(methods, ", ")
-	handler := http.StripPrefix(pattern, web.NewTopHandler(ssfe.log,
+	handler := http.StripPrefix(pattern, web.NewTopHandler(sfe.log,
 		web.FrontEndHandlerFunc(func(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
 			span := trace.SpanFromContext(ctx)
 			span.SetName(pattern)
@@ -140,7 +132,7 @@ func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern stri
 			}
 			tls := request.Header.Get("TLS-Version")
 			if tls == "TLSv1" || tls == "TLSv1.1" {
-				ssfe.sendError(response, logEvent, probs.Malformed("upgrade your ACME client to support TLSv1.2 or better"), nil)
+				sfe.sendError(response, logEvent, probs.Malformed("upgrade your ACME client to support TLSv1.2 or better"), nil)
 				return
 			}
 
@@ -150,19 +142,19 @@ func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern stri
 				// of responses for us. This keeps the Content-Length for HEAD
 				// requests as the same as GET requests per the spec.
 			case "OPTIONS":
-				ssfe.Options(response, request, methodsStr, methodsMap)
+				sfe.Options(response, request, methodsStr, methodsMap)
 				return
 			}
 
 			if !methodsMap[request.Method] {
 				response.Header().Set("Allow", methodsStr)
-				ssfe.sendError(response, logEvent, probs.MethodNotAllowed(), nil)
+				sfe.sendError(response, logEvent, probs.MethodNotAllowed(), nil)
 				return
 			}
 
-			ssfe.setCORSHeaders(response, request, "")
+			sfe.setCORSHeaders(response, request, "")
 
-			timeout := ssfe.requestTimeout
+			timeout := sfe.requestTimeout
 			if timeout == 0 {
 				timeout = 5 * time.Minute
 			}
@@ -175,6 +167,7 @@ func (ssfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern stri
 	))
 	mux.Handle(pattern, handler)
 }
+*/
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, renderedIndex)
@@ -204,64 +197,44 @@ func makeHandler(fn func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 
 // Handler returns an http.Handler that uses various functions for
 // various ACME-specified paths.
-func (ssfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
+func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
 	m := http.NewServeMux()
 
 	static, _ := fs.Sub(staticFS, "static")
-	handler := http.StripPrefix("/static/", http.FileServer(http.FS(static)))
+	handler := http.StripPrefix("/static/", http.FileServerFS(static))
 	m.Handle("/static/", handler)
 
 	m.HandleFunc("/", makeHandler(indexHandler))
 	m.HandleFunc("/unpause", makeHandler(unpauseHandler))
 
-	ssfe.HandleFunc(m, "/build", ssfe.BuildID, "GET")
-	//ssfe.HandleFunc(m, "/unpause", ssfe.Unpause, "GET", "POST")
+	m.HandleFunc("/build", sfe.BuildID)
+	//sfe.HandleFunc(m, "/unpause", sfe.Unpause, "GET", "POST")
 
-	return measured_http.New(m, ssfe.clk, stats, oTelHTTPOptions...)
-}
-
-// sendError wraps web.SendError
-func (ssfe *SelfServiceFrontEndImpl) sendError(response http.ResponseWriter, logEvent *web.RequestEvent, prob *probs.ProblemDetails, ierr error) {
-	var bErr *berrors.BoulderError
-	if errors.As(ierr, &bErr) {
-		retryAfterSeconds := int(bErr.RetryAfter.Round(time.Second).Seconds())
-		if retryAfterSeconds > 0 {
-			response.Header().Add(headerRetryAfter, strconv.Itoa(retryAfterSeconds))
-			if bErr.Type == berrors.RateLimit {
-				response.Header().Add("Link", link("https://letsencrypt.org/docs/rate-limits", "help"))
-			}
-		}
-	}
-	//ssfe.stats.httpErrorCount.With(prometheus.Labels{"type": string(prob.Type)}).Inc()
-	web.SendError(ssfe.log, response, logEvent, prob, ierr)
-}
-
-func link(url, relation string) string {
-	return fmt.Sprintf("<%s>;rel=\"%s\"", url, relation)
+	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
 }
 
 // BuildID tells the requester what build we're running.
-func (ssfe *SelfServiceFrontEndImpl) BuildID(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
+func (sfe *SelfServiceFrontEndImpl) BuildID(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "text/plain")
 	response.WriteHeader(http.StatusOK)
 	detailsString := fmt.Sprintf("Boulder=(%s %s)", core.GetBuildID(), core.GetBuildTime())
 	if _, err := fmt.Fprintln(response, detailsString); err != nil {
-		ssfe.log.Warningf("Could not write response: %s", err)
+		sfe.log.Warningf("Could not write response: %s", err)
 	}
 }
 
 // Unpause allows a requester to unpause their account.
-func (ssfe *SelfServiceFrontEndImpl) Unpause(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
+func (sfe *SelfServiceFrontEndImpl) Unpause(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "text/plain")
 	response.WriteHeader(http.StatusOK)
 	detailsString := fmt.Sprintln("Unpause is not yet implemented, apparently.")
 	if _, err := fmt.Fprintln(response, detailsString); err != nil {
-		ssfe.log.Warningf("Could not write response: %s", err)
+		sfe.log.Warningf("Could not write response: %s", err)
 	}
 }
 
 // Options responds to an HTTP OPTIONS request.
-func (ssfe *SelfServiceFrontEndImpl) Options(response http.ResponseWriter, request *http.Request, methodsStr string, methodsMap map[string]bool) {
+func (sfe *SelfServiceFrontEndImpl) Options(response http.ResponseWriter, request *http.Request, methodsStr string, methodsMap map[string]bool) {
 	// Every OPTIONS request gets an Allow header with a list of supported methods.
 	response.Header().Set("Allow", methodsStr)
 
@@ -272,7 +245,7 @@ func (ssfe *SelfServiceFrontEndImpl) Options(response http.ResponseWriter, reque
 		reqMethod = "GET"
 	}
 	if methodsMap[reqMethod] {
-		ssfe.setCORSHeaders(response, request, methodsStr)
+		sfe.setCORSHeaders(response, request, methodsStr)
 	}
 }
 
@@ -280,7 +253,7 @@ func (ssfe *SelfServiceFrontEndImpl) Options(response http.ResponseWriter, reque
 // request. If allowMethods == "" the request is assumed to be a CORS
 // actual request and no Access-Control-Allow-Methods header will be
 // sent.
-func (ssfe *SelfServiceFrontEndImpl) setCORSHeaders(response http.ResponseWriter, request *http.Request, allowMethods string) {
+func (sfe *SelfServiceFrontEndImpl) setCORSHeaders(response http.ResponseWriter, request *http.Request, allowMethods string) {
 	reqOrigin := request.Header.Get("Origin")
 	if reqOrigin == "" {
 		// This is not a CORS request.
@@ -291,7 +264,7 @@ func (ssfe *SelfServiceFrontEndImpl) setCORSHeaders(response http.ResponseWriter
 	// allowed origin in config. Otherwise, disallow by returning
 	// without setting any CORS headers.
 	allow := false
-	for _, ao := range ssfe.AllowOrigins {
+	for _, ao := range sfe.AllowOrigins {
 		if ao == "*" {
 			response.Header().Set("Access-Control-Allow-Origin", "*")
 			allow = true

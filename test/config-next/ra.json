@@ -95,7 +95,7 @@
 						"bad-key-revoker.boulder",
 						"ocsp-responder.boulder",
 						"wfe.boulder",
-						"ssfe.boulder"
+						"sfe.boulder"
 					]
 				},
 				"grpc.health.v1.Health": {

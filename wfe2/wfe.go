@@ -253,7 +253,7 @@ func NewWebFrontEndImpl(
 // * Never send a body in response to a HEAD request. Anything
 // written by the handler will be discarded if the method is HEAD.
 // Also, all handlers that accept GET automatically accept HEAD.
-func (wfe *WebFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern string, h web.FrontEndHandlerFunc, methods ...string) {
+func (wfe *WebFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern string, h web.WFEHandlerFunc, methods ...string) {
 	methodsMap := make(map[string]bool)
 	for _, m := range methods {
 		methodsMap[m] = true
@@ -265,7 +265,7 @@ func (wfe *WebFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern string, h web
 	}
 	methodsStr := strings.Join(methods, ", ")
 	handler := http.StripPrefix(pattern, web.NewTopHandler(wfe.log,
-		web.FrontEndHandlerFunc(func(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
+		web.WFEHandlerFunc(func(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
 			span := trace.SpanFromContext(ctx)
 			span.SetName(pattern)
 
@@ -442,7 +442,7 @@ func (wfe *WebFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions
 	// We don't use our special HandleFunc for "/" because it matches everything,
 	// meaning we can wind up returning 405 when we mean to return 404. See
 	// https://github.com/letsencrypt/boulder/issues/717
-	m.Handle("/", web.NewTopHandler(wfe.log, web.FrontEndHandlerFunc(wfe.Index)))
+	m.Handle("/", web.NewTopHandler(wfe.log, web.WFEHandlerFunc(wfe.Index)))
 	return measured_http.New(m, wfe.clk, stats, oTelHTTPOptions...)
 }
 

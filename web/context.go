@@ -78,24 +78,24 @@ func (e *RequestEvent) Suppress() {
 	}
 }
 
-type FrontEndHandlerFunc func(context.Context, *RequestEvent, http.ResponseWriter, *http.Request)
+type WFEHandlerFunc func(context.Context, *RequestEvent, http.ResponseWriter, *http.Request)
 
-func (f FrontEndHandlerFunc) ServeHTTP(e *RequestEvent, w http.ResponseWriter, r *http.Request) {
+func (f WFEHandlerFunc) ServeHTTP(e *RequestEvent, w http.ResponseWriter, r *http.Request) {
 	f(r.Context(), e, w, r)
 }
 
-type frontEndHandler interface {
+type wfeHandler interface {
 	ServeHTTP(e *RequestEvent, w http.ResponseWriter, r *http.Request)
 }
 
 type TopHandler struct {
-	fe  frontEndHandler
+	wfe wfeHandler
 	log blog.Logger
 }
 
-func NewTopHandler(log blog.Logger, fe frontEndHandler) *TopHandler {
+func NewTopHandler(log blog.Logger, wfe wfeHandler) *TopHandler {
 	return &TopHandler{
-		fe:  fe,
+		wfe: wfe,
 		log: log,
 	}
 }
@@ -161,7 +161,7 @@ func (th *TopHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logEvent.Latency = time.Since(begin).Seconds()
 		th.logEvent(logEvent)
 	}()
-	th.fe.ServeHTTP(logEvent, rwws, r)
+	th.wfe.ServeHTTP(logEvent, rwws, r)
 }
 
 func (th *TopHandler) logEvent(logEvent *RequestEvent) {

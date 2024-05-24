@@ -22,11 +22,11 @@ import (
 	"github.com/letsencrypt/boulder/ratelimits"
 	bredis "github.com/letsencrypt/boulder/redis"
 	sapb "github.com/letsencrypt/boulder/sa/proto"
-	"github.com/letsencrypt/boulder/ssfe"
+	"github.com/letsencrypt/boulder/sfe"
 )
 
 type Config struct {
-	SSFE struct {
+	SFE struct {
 		DebugAddr string `validate:"omitempty,hostname_port"`
 
 		// ListenAddress is the address:port on which to listen for incoming
@@ -34,15 +34,15 @@ type Config struct {
 		ListenAddress string `validate:"omitempty,hostname_port"`
 
 		// TLSListenAddress is the address:port on which to listen for incoming
-		// HTTPS requests. If none is provided the SSFE will not listen for HTTPS
+		// HTTPS requests. If none is provided the SFE will not listen for HTTPS
 		// requests.
 		TLSListenAddress string `validate:"omitempty,hostname_port"`
 
 		// Timeout is the per-request overall timeout. This should be slightly
-		// lower than the upstream's timeout when making request to the SSFE.
+		// lower than the upstream's timeout when making request to the SFE.
 		Timeout config.Duration `validate:"-"`
 
-		// ShutdownStopTimeout is the duration that the SSFE will wait before
+		// ShutdownStopTimeout is the duration that the SFE will wait before
 		// shutting down any listening servers.
 		ShutdownStopTimeout config.Duration
 
@@ -94,15 +94,15 @@ type CacheConfig struct {
 	TTL  config.Duration
 }
 
-func setupSSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient) {
-	tlsConfig, err := c.SSFE.TLS.Load(scope)
+func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient) {
+	tlsConfig, err := c.SFE.TLS.Load(scope)
 	cmd.FailOnError(err, "TLS config")
 
-	raConn, err := bgrpc.ClientSetup(c.SSFE.RAService, tlsConfig, scope, clk)
+	raConn, err := bgrpc.ClientSetup(c.SFE.RAService, tlsConfig, scope, clk)
 	cmd.FailOnError(err, "Failed to load credentials and create gRPC connection to RA")
 	rac := rapb.NewRegistrationAuthorityClient(raConn)
 
-	saConn, err := bgrpc.ClientSetup(c.SSFE.SAService, tlsConfig, scope, clk)
+	saConn, err := bgrpc.ClientSetup(c.SFE.SAService, tlsConfig, scope, clk)
 	cmd.FailOnError(err, "Failed to load credentials and create gRPC connection to SA")
 	sac := sapb.NewStorageAuthorityReadOnlyClient(saConn)
 
@@ -140,64 +140,64 @@ func main() {
 	err := cmd.ReadConfigFile(*configFile, &c)
 	cmd.FailOnError(err, "Reading JSON config file into config structure")
 
-	features.Set(c.SSFE.Features)
+	features.Set(c.SFE.Features)
 
 	if *listenAddr != "" {
-		c.SSFE.ListenAddress = *listenAddr
+		c.SFE.ListenAddress = *listenAddr
 	}
-	if c.SSFE.ListenAddress == "" {
+	if c.SFE.ListenAddress == "" {
 		cmd.Fail("HTTP listen address is not configured")
 	}
 	if *tlsAddr != "" {
-		c.SSFE.TLSListenAddress = *tlsAddr
+		c.SFE.TLSListenAddress = *tlsAddr
 	}
 	if *debugAddr != "" {
-		c.SSFE.DebugAddr = *debugAddr
+		c.SFE.DebugAddr = *debugAddr
 	}
 
-	stats, logger, oTelShutdown := cmd.StatsAndLogging(c.Syslog, c.OpenTelemetry, c.SSFE.DebugAddr)
+	stats, logger, oTelShutdown := cmd.StatsAndLogging(c.Syslog, c.OpenTelemetry, c.SFE.DebugAddr)
 	logger.Info(cmd.VersionString())
 
 	clk := cmd.Clock()
 
-	rac, sac := setupSSFE(c, stats, clk)
+	rac, sac := setupSFE(c, stats, clk)
 
 	var limiter *ratelimits.Limiter
 	var txnBuilder *ratelimits.TransactionBuilder
 	var limiterRedis *bredis.Ring
-	if c.SSFE.Limiter.Defaults != "" {
+	if c.SFE.Limiter.Defaults != "" {
 		// Setup rate limiting.
-		limiterRedis, err = bredis.NewRingFromConfig(*c.SSFE.Limiter.Redis, stats, logger)
+		limiterRedis, err = bredis.NewRingFromConfig(*c.SFE.Limiter.Redis, stats, logger)
 		cmd.FailOnError(err, "Failed to create Redis ring")
 
 		source := ratelimits.NewRedisSource(limiterRedis.Ring, clk, stats)
 		limiter, err = ratelimits.NewLimiter(clk, source, stats)
 		cmd.FailOnError(err, "Failed to create rate limiter")
-		txnBuilder, err = ratelimits.NewTransactionBuilder(c.SSFE.Limiter.Defaults, c.SSFE.Limiter.Overrides)
+		txnBuilder, err = ratelimits.NewTransactionBuilder(c.SFE.Limiter.Defaults, c.SFE.Limiter.Overrides)
 		cmd.FailOnError(err, "Failed to create rate limits transaction builder")
 	}
 
-	ssfei, err := ssfe.NewSelfServiceFrontEndImpl(
+	sfei, err := sfe.NewSelfServiceFrontEndImpl(
 		stats,
 		clk,
 		logger,
-		c.SSFE.Timeout.Duration,
+		c.SFE.Timeout.Duration,
 		rac,
 		sac,
 		limiter,
 		txnBuilder,
 	)
-	cmd.FailOnError(err, "Unable to create SSFE")
-	ssfei.AllowOrigins = c.SSFE.AllowOrigins
+	cmd.FailOnError(err, "Unable to create SFE")
+	sfei.AllowOrigins = c.SFE.AllowOrigins
 
-	logger.Infof("Server running, listening on %s....", c.SSFE.ListenAddress)
-	handler := ssfei.Handler(stats, c.OpenTelemetryHTTPConfig.Options()...)
+	logger.Infof("Server running, listening on %s....", c.SFE.ListenAddress)
+	handler := sfei.Handler(stats, c.OpenTelemetryHTTPConfig.Options()...)
 
 	srv := http.Server{
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		Addr:         c.SSFE.ListenAddress,
+		Addr:         c.SFE.ListenAddress,
 		ErrorLog:     log.New(errorWriter{logger}, "", 0),
 		Handler:      handler,
 	}
@@ -213,14 +213,14 @@ func main() {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		Addr:         c.SSFE.TLSListenAddress,
+		Addr:         c.SFE.TLSListenAddress,
 		ErrorLog:     log.New(errorWriter{logger}, "", 0),
 		Handler:      handler,
 	}
 	if tlsSrv.Addr != "" {
 		go func() {
 			logger.Infof("TLS server listening on %s", tlsSrv.Addr)
-			err := tlsSrv.ListenAndServeTLS(c.SSFE.ServerCertificatePath, c.SSFE.ServerKeyPath)
+			err := tlsSrv.ListenAndServeTLS(c.SFE.ServerCertificatePath, c.SFE.ServerKeyPath)
 			if err != nil && err != http.ErrServerClosed {
 				cmd.FailOnError(err, "Running TLS server")
 			}
@@ -232,7 +232,7 @@ func main() {
 	// ListenAndServe() and ListenAndServeTLS() to immediately return, then waits
 	// for any lingering connection-handling goroutines to finish their work.
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), c.SSFE.ShutdownStopTimeout.Duration)
+		ctx, cancel := context.WithTimeout(context.Background(), c.SFE.ShutdownStopTimeout.Duration)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 		_ = tlsSrv.Shutdown(ctx)
@@ -244,5 +244,5 @@ func main() {
 }
 
 func init() {
-	cmd.RegisterCommand("ssfe", main, &cmd.ConfigValidator{Config: &Config{}})
+	cmd.RegisterCommand("sfe", main, &cmd.ConfigValidator{Config: &Config{}})
 }

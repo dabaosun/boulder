@@ -1,5 +1,5 @@
 {
-	"ssfe": {
+	"sfe": {
 		"timeout": "30s",
 		"serverCertificatePath": "test/certs/ipki/boulder/cert.pem",
 		"serverKeyPath": "test/certs/ipki/boulder/key.pem",
@@ -9,8 +9,8 @@
 		"shutdownStopTimeout": "10s",
 		"tls": {
 			"caCertFile": "test/certs/ipki/minica.pem",
-			"certFile": "test/certs/ipki/ssfe.boulder/cert.pem",
-			"keyFile": "test/certs/ipki/ssfe.boulder/key.pem"
+			"certFile": "test/certs/ipki/sfe.boulder/cert.pem",
+			"keyFile": "test/certs/ipki/sfe.boulder/key.pem"
 		},
 		"raService": {
 			"dnsAuthority": "consul.service.consul",
@@ -34,7 +34,7 @@
 		},
 		"limiter": {
 			"redis": {
-				"username": "ssfe",
+				"username": "sfe",
 				"passwordFile": "test/secrets/wfe_ratelimits_redis_password",
 				"lookups": [
 					{
@@ -49,8 +49,8 @@
 				"routeRandomly": true,
 				"tls": {
 					"caCertFile": "test/certs/ipki/minica.pem",
-					"certFile": "test/certs/ipki/ssfe.boulder/cert.pem",
-					"keyFile": "test/certs/ipki/ssfe.boulder/key.pem"
+					"certFile": "test/certs/ipki/sfe.boulder/cert.pem",
+					"keyFile": "test/certs/ipki/sfe.boulder/key.pem"
 				}
 			},
 			"Defaults": "test/config-next/wfe2-ratelimit-defaults.yml",
