@@ -1,7 +1,6 @@
 package sfe
 
 import (
-	"context"
 	"embed"
 	"errors"
 	"fmt"
@@ -23,7 +22,6 @@ import (
 	"github.com/letsencrypt/boulder/metrics/measured_http"
 	rapb "github.com/letsencrypt/boulder/ra/proto"
 	sapb "github.com/letsencrypt/boulder/sa/proto"
-	"github.com/letsencrypt/boulder/web"
 )
 
 var (
@@ -64,6 +62,10 @@ type SelfServiceFrontEndImpl struct {
 
 	limiter    *ratelimits.Limiter
 	txnBuilder *ratelimits.TransactionBuilder
+
+	// unpauseKey is an HMAC-SHA256 key used for verifying the HMAC included in
+	// each unpause request.
+	unpauseKey string
 }
 
 // NewSelfServiceFrontEndImpl constructs a web service for Boulder
@@ -74,6 +76,7 @@ func NewSelfServiceFrontEndImpl(
 	requestTimeout time.Duration,
 	rac rapb.RegistrationAuthorityClient,
 	sac sapb.StorageAuthorityReadOnlyClient,
+	unpauseKey string,
 	limiter *ratelimits.Limiter,
 	txnBuilder *ratelimits.TransactionBuilder,
 ) (SelfServiceFrontEndImpl, error) {
@@ -86,6 +89,7 @@ func NewSelfServiceFrontEndImpl(
 		sa:             sac,
 		limiter:        limiter,
 		txnBuilder:     txnBuilder,
+		unpauseKey:     unpauseKey,
 	}
 
 	return sfe, nil
@@ -169,12 +173,22 @@ func (sfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern strin
 }
 */
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	renderTemplate(w, renderedIndex)
-}
+// Handler returns an http.Handler that uses various functions for
+// various ACME-specified paths.
+func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
+	m := http.NewServeMux()
 
-func unpauseHandler(w http.ResponseWriter, r *http.Request) {
-	renderTemplate(w, renderedUnpause)
+	static, _ := fs.Sub(staticFS, "static")
+	handler := http.StripPrefix("/static/", http.FileServerFS(static))
+	m.Handle("/static/", handler)
+
+	m.HandleFunc("/", sfe.Index)
+	m.HandleFunc("/unpause", sfe.Unpause)
+
+	m.HandleFunc("/build", sfe.BuildID)
+	//sfe.HandleFunc(m, "/unpause", sfe.Unpause, "GET", "POST")
+
+	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
 }
 
 func renderTemplate(w http.ResponseWriter, tmpl *template.Template) {
@@ -189,28 +203,9 @@ func renderTemplate(w http.ResponseWriter, tmpl *template.Template) {
 	}
 }
 
-func makeHandler(fn func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		fn(w, r)
-	}
-}
-
-// Handler returns an http.Handler that uses various functions for
-// various ACME-specified paths.
-func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
-	m := http.NewServeMux()
-
-	static, _ := fs.Sub(staticFS, "static")
-	handler := http.StripPrefix("/static/", http.FileServerFS(static))
-	m.Handle("/static/", handler)
-
-	m.HandleFunc("/", makeHandler(indexHandler))
-	m.HandleFunc("/unpause", makeHandler(unpauseHandler))
-
-	m.HandleFunc("/build", sfe.BuildID)
-	//sfe.HandleFunc(m, "/unpause", sfe.Unpause, "GET", "POST")
-
-	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
+// Index is the homepage of the SFE
+func (sfe *SelfServiceFrontEndImpl) Index(response http.ResponseWriter, request *http.Request) {
+	renderTemplate(response, renderedIndex)
 }
 
 // BuildID tells the requester what build we're running.
@@ -224,13 +219,8 @@ func (sfe *SelfServiceFrontEndImpl) BuildID(response http.ResponseWriter, reques
 }
 
 // Unpause allows a requester to unpause their account.
-func (sfe *SelfServiceFrontEndImpl) Unpause(ctx context.Context, logEvent *web.RequestEvent, response http.ResponseWriter, request *http.Request) {
-	response.Header().Set("Content-Type", "text/plain")
-	response.WriteHeader(http.StatusOK)
-	detailsString := fmt.Sprintln("Unpause is not yet implemented, apparently.")
-	if _, err := fmt.Fprintln(response, detailsString); err != nil {
-		sfe.log.Warningf("Could not write response: %s", err)
-	}
+func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, request *http.Request) {
+	renderTemplate(response, renderedUnpause)
 }
 
 // Options responds to an HTTP OPTIONS request.

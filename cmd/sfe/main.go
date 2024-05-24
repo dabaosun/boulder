@@ -57,6 +57,13 @@ type Config struct {
 		RAService *cmd.GRPCClientConfig
 		SAService *cmd.GRPCClientConfig
 
+		// UnpauseKey is a secret used for deriving the prefix of each unpause
+		// request. It should contain 256 bits of random data to be suitable as
+		// an HMAC-SHA256 key (e.g. the output of `openssl rand -hex 32`). In a
+		// multi-DC deployment this value should be the same across all
+		// boulder-wfe and sfe instances.
+		UnpauseKey cmd.PasswordConfig `validate:"-"`
+
 		Features features.Config
 
 		Limiter struct {
@@ -94,7 +101,17 @@ type CacheConfig struct {
 	TTL  config.Duration
 }
 
-func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient) {
+func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient, string) {
+	var unpauseKey string
+	if c.SFE.UnpauseKey.PasswordFile != "" {
+		var err error
+		unpauseKey, err = c.SFE.UnpauseKey.Pass()
+		cmd.FailOnError(err, "Failed to load unpauseKey")
+		if len(unpauseKey) <= 0 {
+			cmd.FailOnError(err, "unpauseKey must not be empty")
+		}
+	}
+
 	tlsConfig, err := c.SFE.TLS.Load(scope)
 	cmd.FailOnError(err, "TLS config")
 
@@ -106,7 +123,7 @@ func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.Regi
 	cmd.FailOnError(err, "Failed to load credentials and create gRPC connection to SA")
 	sac := sapb.NewStorageAuthorityReadOnlyClient(saConn)
 
-	return rac, sac
+	return rac, sac, unpauseKey
 }
 
 type errorWriter struct {
@@ -160,7 +177,7 @@ func main() {
 
 	clk := cmd.Clock()
 
-	rac, sac := setupSFE(c, stats, clk)
+	rac, sac, unpauseKey := setupSFE(c, stats, clk)
 
 	var limiter *ratelimits.Limiter
 	var txnBuilder *ratelimits.TransactionBuilder
@@ -184,6 +201,7 @@ func main() {
 		c.SFE.Timeout.Duration,
 		rac,
 		sac,
+		unpauseKey,
 		limiter,
 		txnBuilder,
 	)
