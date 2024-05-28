@@ -1156,7 +1156,7 @@ func (ssa *SQLStorageAuthority) leaseOldestCRLShard(ctx context.Context, req *sa
 					VALUES (?, ?, ?)`,
 				req.IssuerNameID,
 				shardIdx,
-				req.Until.AsTime().Truncate(time.Second),
+				req.Until.AsTime(),
 			)
 			if err != nil {
 				return -1, fmt.Errorf("inserting selected shard: %w", err)
@@ -1168,7 +1168,7 @@ func (ssa *SQLStorageAuthority) leaseOldestCRLShard(ctx context.Context, req *sa
 					WHERE issuerID = ?
 					AND idx = ?
 					LIMIT 1`,
-				req.Until.AsTime().Truncate(time.Second),
+				req.Until.AsTime(),
 				req.IssuerNameID,
 				shardIdx,
 			)
@@ -1224,7 +1224,7 @@ func (ssa *SQLStorageAuthority) leaseSpecificCRLShard(ctx context.Context, req *
 					VALUES (?, ?, ?)`,
 				req.IssuerNameID,
 				req.MinShardIdx,
-				req.Until.AsTime().Truncate(time.Second),
+				req.Until.AsTime(),
 			)
 			if err != nil {
 				return nil, fmt.Errorf("inserting selected shard: %w", err)
@@ -1236,7 +1236,7 @@ func (ssa *SQLStorageAuthority) leaseSpecificCRLShard(ctx context.Context, req *
 					WHERE issuerID = ?
 					AND idx = ?
 					LIMIT 1`,
-				req.Until.AsTime().Truncate(time.Second),
+				req.Until.AsTime(),
 				req.IssuerNameID,
 				req.MinShardIdx,
 			)
@@ -1279,7 +1279,7 @@ func (ssa *SQLStorageAuthority) UpdateCRLShard(ctx context.Context, req *sapb.Up
 	}
 
 	_, err := db.WithTransaction(ctx, ssa.dbMap, func(tx db.Executor) (interface{}, error) {
-		thisUpdate := req.ThisUpdate.AsTime().Truncate(time.Second)
+		thisUpdate := req.ThisUpdate.AsTime().Truncate(time.Second).Add(time.Second)
 		res, err := tx.ExecContext(ctx,
 			`UPDATE crlShards
 				SET thisUpdate = ?, nextUpdate = ?, leasedUntil = ?
