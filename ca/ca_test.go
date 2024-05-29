@@ -41,11 +41,6 @@ import (
 	"github.com/letsencrypt/boulder/test"
 )
 
-func TestImplementation(t *testing.T) {
-	t.Parallel()
-	test.AssertImplementsGRPCServer(t, &certificateAuthorityImpl{}, capb.UnimplementedCertificateAuthorityServer{})
-}
-
 var (
 	// * Random public key
 	// * CN = not-example.com
@@ -922,7 +917,6 @@ func TestRejectValidityTooLong(t *testing.T) {
 		testCtx.fc)
 	test.AssertNotError(t, err, "Failed to create CA")
 
-	// This time is a few minutes before the notAfter in testdata/ca_cert.pem
 	future, err := time.Parse(time.RFC3339, "2025-02-10T00:30:00Z")
 
 	test.AssertNotError(t, err, "Failed to parse time")

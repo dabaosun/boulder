@@ -36,7 +36,8 @@ var (
 // read-only methods provided by the SQLStorageAuthorityRO, those wrapper
 // implementations are in saro.go, next to the real implementations.
 type SQLStorageAuthority struct {
-	sapb.UnimplementedStorageAuthorityServer
+	sapb.UnsafeStorageAuthorityServer
+
 	*SQLStorageAuthorityRO
 
 	dbMap *db.WrappedMap
@@ -48,6 +49,8 @@ type SQLStorageAuthority struct {
 	// this occurs.
 	rateLimitWriteErrors prometheus.Counter
 }
+
+var _ sapb.StorageAuthorityServer = (*SQLStorageAuthority)(nil)
 
 // NewSQLStorageAuthorityWrapping provides persistence using a SQL backend for
 // Boulder. It takes a read-only storage authority to wrap, which is useful if
@@ -554,31 +557,8 @@ func (ssa *SQLStorageAuthority) NewOrderAndAuthzs(ctx context.Context, req *sapb
 			return nil, err
 		}
 
-		// Fourth, insert all of the requestedNames.
-		// TODO(#7432): Remove this
-		inserter, err = db.NewMultiInserter("requestedNames", []string{"orderID", "reversedName"}, "")
-		if err != nil {
-			return nil, err
-		}
-		for _, name := range req.NewOrder.Names {
-			err := inserter.Add([]interface{}{orderID, ReverseName(name)})
-			if err != nil {
-				return nil, err
-			}
-		}
-		_, err = inserter.Insert(ctx, tx)
-		if err != nil {
-			return nil, err
-		}
-
-		// Fifth, insert the FQDNSet entry for the order.
-		err = addOrderFQDNSet(ctx,
-			tx,
-			req.NewOrder.Names,
-			orderID,
-			req.NewOrder.RegistrationID,
-			expires,
-		)
+		// Fourth, insert the FQDNSet entry for the order.
+		err = addOrderFQDNSet(ctx, tx, req.NewOrder.Names, orderID, req.NewOrder.RegistrationID, expires)
 		if err != nil {
 			return nil, err
 		}

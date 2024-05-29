@@ -18,11 +18,19 @@ Service = collections.namedtuple('Service', ('name', 'debug_port', 'grpc_port', 
 SERVICES = (
     Service('boulder-remoteva-a',
         8011, 9397, 'rva.boulder',
-        ('./bin/boulder', 'boulder-remoteva', '--config', os.path.join(config_dir, 'va-remote-a.json'), '--addr', ':9397', '--debug-addr', ':8011'),
+        ('./bin/boulder', 'boulder-va', '--config', os.path.join(config_dir, 'va-remote-a.json'), '--addr', ':9397', '--debug-addr', ':8011'),
         None),
     Service('boulder-remoteva-b',
         8012, 9498, 'rva.boulder',
-        ('./bin/boulder', 'boulder-remoteva', '--config', os.path.join(config_dir, 'va-remote-b.json'), '--addr', ':9498', '--debug-addr', ':8012'),
+        ('./bin/boulder', 'boulder-va', '--config', os.path.join(config_dir, 'va-remote-b.json'), '--addr', ':9498', '--debug-addr', ':8012'),
+        None),
+    Service('remoteva-a',
+        8211, 9897, 'rva.boulder',
+        ('./bin/boulder', 'remoteva', '--config', os.path.join(config_dir, 'remoteva-a.json'), '--addr', ':9897', '--debug-addr', ':8211'),
+        None),
+    Service('remoteva-b',
+        8212, 9998, 'rva.boulder',
+        ('./bin/boulder', 'remoteva', '--config', os.path.join(config_dir, 'remoteva-b.json'), '--addr', ':9998', '--debug-addr', ':8212'),
         None),
     Service('boulder-sa-1',
         8003, 9395, 'sa.boulder',
@@ -34,7 +42,7 @@ SERVICES = (
         None),
     Service('aia-test-srv',
         4502, None, None,
-        ('./bin/aia-test-srv', '--addr', ':4502', '--hierarchy', '/hierarchy'), None),
+        ('./bin/aia-test-srv', '--addr', ':4502', '--hierarchy', 'test/certs/webpki/'), None),
     Service('ct-test-srv',
         4600, None, None,
         ('./bin/ct-test-srv', '--config', 'test/ct-test-srv/ct-test-srv.json'), None),
@@ -48,7 +56,7 @@ SERVICES = (
         None),
     Service('mail-test-srv',
         9380, None, None,
-        ('./bin/mail-test-srv', '--closeFirst', '5', '--cert', 'test/mail-test-srv/localhost/cert.pem', '--key', 'test/mail-test-srv/localhost/key.pem'),
+        ('./bin/mail-test-srv', '--closeFirst', '5', '--cert', 'test/certs/ipki/localhost/cert.pem', '--key', 'test/certs/ipki/localhost/key.pem'),
         None),
     Service('ocsp-responder',
         8005, None, None,
@@ -57,11 +65,11 @@ SERVICES = (
     Service('boulder-va-1',
         8004, 9392, 'va.boulder',
         ('./bin/boulder', 'boulder-va', '--config', os.path.join(config_dir, 'va.json'), '--addr', ':9392', '--debug-addr', ':8004'),
-        ('boulder-remoteva-a', 'boulder-remoteva-b')),
+        ('boulder-remoteva-a', 'boulder-remoteva-b', 'remoteva-a', 'remoteva-b')),
     Service('boulder-va-2',
         8104, 9492, 'va.boulder',
         ('./bin/boulder', 'boulder-va', '--config', os.path.join(config_dir, 'va.json'), '--addr', ':9492', '--debug-addr', ':8104'),
-        ('boulder-remoteva-a', 'boulder-remoteva-b')),
+        ('boulder-remoteva-a', 'boulder-remoteva-b', 'remoteva-a', 'remoteva-b')),
     Service('boulder-ca-1',
         8001, 9393, 'ca.boulder',
         ('./bin/boulder', 'boulder-ca', '--config', os.path.join(config_dir, 'ca.json'), '--addr', ':9393', '--debug-addr', ':8001'),
@@ -159,17 +167,6 @@ processes = []
 # processes because we want integration tests to be able to stop/start it (e.g.
 # to run the load-generator).
 challSrvProcess = None
-
-def setupHierarchy():
-    """Set up the issuance hierarchy. Must have called install() before this."""
-    e = os.environ.copy()
-    e.setdefault("GOBIN", "%s/bin" % os.getcwd())
-    try:
-        subprocess.check_output(["go", "run", "test/cert-ceremonies/generate.go"], env=e)
-    except subprocess.CalledProcessError as e:
-        print(e.output)
-        raise
-
 
 def install(race_detection):
     # Pass empty BUILD_TIME and BUILD_ID flags to avoid constantly invalidating the
@@ -274,8 +271,8 @@ def startChallSrv():
         '-defaultIPv6', '',
         '--dns01', ':8053,:8054',
         '--doh', ':8343,:8443',
-        '--doh-cert', 'test/grpc-creds/10.77.77.77/cert.pem',
-        '--doh-cert-key', 'test/grpc-creds/10.77.77.77/key.pem',
+        '--doh-cert', 'test/certs/ipki/10.77.77.77/cert.pem',
+        '--doh-cert-key', 'test/certs/ipki/10.77.77.77/key.pem',
         '--management', ':8055',
         '--http01', '10.77.77.77:80',
         '-https01', '10.77.77.77:443',

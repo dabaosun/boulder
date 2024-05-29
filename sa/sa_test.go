@@ -74,11 +74,6 @@ func (s *fakeServerStream[T]) Context() context.Context {
 	return context.Background()
 }
 
-func TestImplementation(t *testing.T) {
-	test.AssertImplementsGRPCServer(t, &SQLStorageAuthority{}, sapb.UnimplementedStorageAuthorityServer{})
-	test.AssertImplementsGRPCServer(t, &SQLStorageAuthorityRO{}, sapb.UnimplementedStorageAuthorityReadOnlyServer{})
-}
-
 // initSA constructs a SQLStorageAuthority and a clean up function that should
 // be defer'ed to the end of the test.
 func initSA(t *testing.T) (*SQLStorageAuthority, clock.FakeClock, func()) {

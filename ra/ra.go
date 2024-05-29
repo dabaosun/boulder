@@ -80,7 +80,7 @@ type caaChecker interface {
 // NOTE: All of the fields in RegistrationAuthorityImpl need to be
 // populated, or there is a risk of panic.
 type RegistrationAuthorityImpl struct {
-	rapb.UnimplementedRegistrationAuthorityServer
+	rapb.UnsafeRegistrationAuthorityServer
 	CA        capb.CertificateAuthorityClient
 	OCSP      capb.OCSPGeneratorClient
 	VA        vapb.VAClient
@@ -121,7 +121,10 @@ type RegistrationAuthorityImpl struct {
 	authzAges                   *prometheus.HistogramVec
 	orderAges                   *prometheus.HistogramVec
 	inflightFinalizes           prometheus.Gauge
+	certCSRMismatch             prometheus.Counter
 }
+
+var _ rapb.RegistrationAuthorityServer = (*RegistrationAuthorityImpl)(nil)
 
 // NewRegistrationAuthorityImpl constructs a new RA object.
 func NewRegistrationAuthorityImpl(
@@ -238,6 +241,12 @@ func NewRegistrationAuthorityImpl(
 	})
 	stats.MustRegister(inflightFinalizes)
 
+	certCSRMismatch := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cert_csr_mismatch",
+		Help: "Number of issued certificates that have failed ra.matchesCSR for any reason. This is _real bad_ and should be alerted upon.",
+	})
+	stats.MustRegister(certCSRMismatch)
+
 	issuersByNameID := make(map[issuance.NameID]*issuance.Certificate)
 	for _, issuer := range issuers {
 		issuersByNameID[issuer.NameID()] = issuer
@@ -273,6 +282,7 @@ func NewRegistrationAuthorityImpl(
 		authzAges:                    authzAges,
 		orderAges:                    orderAges,
 		inflightFinalizes:            inflightFinalizes,
+		certCSRMismatch:              certCSRMismatch,
 	}
 	return ra
 }
@@ -1286,8 +1296,10 @@ type certProfileID struct {
 	hash []byte
 }
 
-// issueCertificateInner handles the heavy lifting aspects of certificate
-// issuance.
+// issueCertificateInner is part of the [issuance cycle].
+//
+// It gets a precertificate from the CA, submits it to CT logs to get SCTs,
+// then sends the precertificate and the SCTs to the CA to get a final certificate.
 //
 // This function is responsible for ensuring that we never try to issue a final
 // certificate twice for the same precertificate, because that has the potential
@@ -1299,6 +1311,8 @@ type certProfileID struct {
 // never have final certificates issued for them (because there is a possibility
 // that the certificate was actually issued but there was an error returning
 // it).
+//
+// [issuance cycle]: https://github.com/letsencrypt/boulder/blob/main/docs/ISSUANCE-CYCLE.md
 func (ra *RegistrationAuthorityImpl) issueCertificateInner(
 	ctx context.Context,
 	csr *x509.CertificateRequest,
@@ -1329,6 +1343,9 @@ func (ra *RegistrationAuthorityImpl) issueCertificateInner(
 		OrderID:         int64(oID),
 		CertProfileName: profileName,
 	}
+	// Once we get a precert from IssuePrecertificate, we must attempt issuing
+	// a final certificate at most once. We achieve that by bailing on any error
+	// between here and IssueCertificateForPrecertificate.
 	precert, err := ra.CA.IssuePrecertificate(ctx, issueReq)
 	if err != nil {
 		return nil, nil, wrapError(err, "issuing precertificate")
@@ -1363,9 +1380,9 @@ func (ra *RegistrationAuthorityImpl) issueCertificateInner(
 	// Asynchronously submit the final certificate to any configured logs
 	go ra.ctpolicy.SubmitFinalCert(cert.Der, parsedCertificate.NotAfter)
 
-	// TODO(#6587): Make this error case Very Alarming
 	err = ra.matchesCSR(parsedCertificate, csr)
 	if err != nil {
+		ra.certCSRMismatch.Inc()
 		return nil, nil, err
 	}
 
@@ -2655,8 +2672,8 @@ func (ra *RegistrationAuthorityImpl) NewOrder(ctx context.Context, req *rapb.New
 	if err != nil {
 		return nil, err
 	}
-	// TODO(#7153): Check each value via core.IsAnyNilOrZero
-	if storedOrder.Id == 0 || storedOrder.Status == "" || storedOrder.RegistrationID == 0 || len(storedOrder.Names) == 0 || core.IsAnyNilOrZero(storedOrder.Created, storedOrder.Expires) {
+
+	if core.IsAnyNilOrZero(storedOrder.Id, storedOrder.Status, storedOrder.RegistrationID, storedOrder.Names, storedOrder.Created, storedOrder.Expires) {
 		return nil, errIncompleteGRPCResponse
 	}
 	ra.orderAges.WithLabelValues("NewOrder").Observe(0)
