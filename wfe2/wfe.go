@@ -2315,6 +2315,31 @@ func (wfe *WebFrontEndImpl) NewOrder(
 		return
 	}
 
+	// Check if the (account, identifier) pair is paused.
+	ids := make([]*sapb.Identifier, len(newOrderRequest.Identifiers))
+	for i, ident := range newOrderRequest.Identifiers {
+		ids[i] = &sapb.Identifier{
+			Type:  string(ident.Type),
+			Value: ident.Value,
+		}
+	}
+	matched, err := wfe.sa.CheckIdentifiersPaused(ctx, &sapb.CheckIdentifiersPausedRequest{
+		RegistrationID: acct.ID,
+		Identifiers:    ids,
+	})
+	if err != nil {
+		wfe.sendError(response, logEvent, web.ProblemDetailsForError(err, "Error checking if identifiers are paused"), err)
+		return
+	}
+	if len(matched.Hostnames) > 0 {
+		// TODO:
+		//   - Add secret key to config for HMAC.
+		//   - Pass the HMAC through to the WFE implementation.
+		//   - Add a new method to produce an HMAC-SHA256 of a message formatted: <registrationID(int64)>||<timestamp(RFC3339)>
+		//   - Make a paused error type that produces an error with the impacted names in this order, this HMAC, and a link to the SFE unpause endpoint.
+		return
+	}
+
 	// Collect up all of the DNS identifier values into a []string for
 	// subsequent layers to process. We reject anything with a non-DNS
 	// type identifier here. Check to make sure one of the strings is
