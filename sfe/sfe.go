@@ -32,13 +32,18 @@ var (
 	dynamicFS embed.FS
 )
 
-var renderedIndex, renderedUnpause *template.Template
+// HTML pages to-be-served by the SFE
+var tmplIndex, tmplUnpausePost, tmplUnpauseParams, tmplUnpauseNoParams *template.Template
 
 // Parse the files once at startup to avoid each request causing the server to
-// JIT parse.
+// JIT parse. The pages are stored in an in-memory embed.FS to prevent
+// unnecessary filesystem I/O on a physical HDD.
 func init() {
-	renderedIndex = template.Must(template.New("index").ParseFS(dynamicFS, "templates/layout.html", "pages/index.html"))
-	renderedUnpause = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause.html"))
+	tmplIndex = template.Must(template.New("index").ParseFS(dynamicFS, "templates/layout.html", "pages/index.html"))
+	tmplUnpausePost = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-post.html"))
+	tmplUnpauseParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-params.html"))
+	tmplUnpauseNoParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-noParams.html"))
+
 }
 
 var errIncompleteGRPCResponse = errors.New("incomplete gRPC response message")
@@ -173,31 +178,33 @@ func (sfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern strin
 }
 */
 
-// Handler returns an http.Handler that uses various functions for
-// various ACME-specified paths.
+// Handler returns an http.Handler that uses various functions for various
+// non-ACME-specified paths. Each endpoint should have a corresponding HTML
+// page that shares the same name as the endpoint.
 func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTTPOptions ...otelhttp.Option) http.Handler {
 	m := http.NewServeMux()
 
-	static, _ := fs.Sub(staticFS, "static")
-	handler := http.StripPrefix("/static/", http.FileServerFS(static))
-	m.Handle("/static/", handler)
+	sfs, _ := fs.Sub(staticFS, "static")
+	staticAssetsHandler := http.StripPrefix("/static/", http.FileServerFS(sfs))
 
+	m.Handle("GET /static/", staticAssetsHandler)
 	m.HandleFunc("/", sfe.Index)
 	m.HandleFunc("/unpause", sfe.Unpause)
-
-	m.HandleFunc("/build", sfe.BuildID)
-	//sfe.HandleFunc(m, "/unpause", sfe.Unpause, "GET", "POST")
+	m.HandleFunc("GET /build", sfe.BuildID)
 
 	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
 }
 
-func renderTemplate(w http.ResponseWriter, tmpl *template.Template) {
+// renderTemplate takes an HTML template instantiated by the SFE init() and an
+// optional dynamicData which are rendered and served back to the client via the
+// response writer.
+func renderTemplate(w http.ResponseWriter, tmpl *template.Template, dynamicData []string) {
 	if tmpl == nil {
 		http.Error(w, "Template does not exist", http.StatusInternalServerError)
 		return
 	}
 
-	err := tmpl.ExecuteTemplate(w, "layout", nil)
+	err := tmpl.ExecuteTemplate(w, "layout", dynamicData)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -205,10 +212,16 @@ func renderTemplate(w http.ResponseWriter, tmpl *template.Template) {
 
 // Index is the homepage of the SFE
 func (sfe *SelfServiceFrontEndImpl) Index(response http.ResponseWriter, request *http.Request) {
-	renderTemplate(response, renderedIndex)
+	if request.Method != "GET" && request.Method != "HEAD" {
+		response.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	renderTemplate(response, tmplIndex, nil)
 }
 
-// BuildID tells the requester what build we're running.
+// BuildID tells the requester what boulder build version is running.
 func (sfe *SelfServiceFrontEndImpl) BuildID(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "text/plain")
 	response.WriteHeader(http.StatusOK)
@@ -218,70 +231,44 @@ func (sfe *SelfServiceFrontEndImpl) BuildID(response http.ResponseWriter, reques
 	}
 }
 
-// Unpause allows a requester to unpause their account.
+// Unpause allows a requester to unpause their account via a form present on the
+// page.
 func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, request *http.Request) {
-	renderTemplate(response, renderedUnpause)
-}
+	sfe.log.AuditInfof("Got here via %s", request.Method)
 
-// Options responds to an HTTP OPTIONS request.
-func (sfe *SelfServiceFrontEndImpl) Options(response http.ResponseWriter, request *http.Request, methodsStr string, methodsMap map[string]bool) {
-	// Every OPTIONS request gets an Allow header with a list of supported methods.
-	response.Header().Set("Allow", methodsStr)
-
-	// CORS preflight requests get additional headers. See
-	// http://www.w3.org/TR/cors/#resource-preflight-requests
-	reqMethod := request.Header.Get("Access-Control-Request-Method")
-	if reqMethod == "" {
-		reqMethod = "GET"
-	}
-	if methodsMap[reqMethod] {
-		sfe.setCORSHeaders(response, request, methodsStr)
-	}
-}
-
-// setCORSHeaders() tells the client that CORS is acceptable for this
-// request. If allowMethods == "" the request is assumed to be a CORS
-// actual request and no Access-Control-Allow-Methods header will be
-// sent.
-func (sfe *SelfServiceFrontEndImpl) setCORSHeaders(response http.ResponseWriter, request *http.Request, allowMethods string) {
-	reqOrigin := request.Header.Get("Origin")
-	if reqOrigin == "" {
-		// This is not a CORS request.
+	if request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST" {
+		response.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST")
+		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Allow CORS if the current origin (or "*") is listed as an
-	// allowed origin in config. Otherwise, disallow by returning
-	// without setting any CORS headers.
-	allow := false
-	for _, ao := range sfe.AllowOrigins {
-		if ao == "*" {
-			response.Header().Set("Access-Control-Allow-Origin", "*")
-			allow = true
-			break
-		} else if ao == reqOrigin {
-			response.Header().Set("Vary", "Origin")
-			response.Header().Set("Access-Control-Allow-Origin", ao)
-			allow = true
-			break
-		}
+	if request.Method == "GET" && len(request.URL.Query()) <= 0 {
+		// For relying parties who stumble across this page. Doesn't allow
+		// unpausing.
+		renderTemplate(response, tmplUnpauseNoParams, nil)
+	} else if request.Method == "GET" {
+		// Serve the actual unpause page given to a Subscriber. Allows
+		// unpausing.
+		renderTemplate(response, tmplUnpauseParams, nil)
+	} else if request.Method == "POST" {
+		// After clicking unpause, serve another page indicating that the
+		// Subscriber should re-attempt issuance.
+		renderTemplate(response, tmplUnpausePost, nil)
 	}
-	if !allow {
-		return
-	}
+}
 
-	if allowMethods != "" {
-		// For an OPTIONS request: allow all methods handled at this URL.
-		response.Header().Set("Access-Control-Allow-Methods", allowMethods)
-	}
-	// NOTE(@cpu): "Content-Type" is considered a 'simple header' that doesn't
-	// need to be explicitly allowed in 'access-control-allow-headers', but only
-	// when the value is one of: `application/x-www-form-urlencoded`,
-	// `multipart/form-data`, or `text/plain`. Since `application/jose+json` is
-	// not one of these values we must be explicit in saying that `Content-Type`
-	// is an allowed header. See MDN for more details:
-	// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers
-	response.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	response.Header().Set("Access-Control-Expose-Headers", "Link, Replay-Nonce, Location")
-	response.Header().Set("Access-Control-Max-Age", "86400")
+// stillFresh verifies a given timestamp's "freshness", ensuring it is within a
+// predefined window to prevent replay attacks.
+func stillFresh(ts time.Time) error {
+
+	return nil
+}
+
+// verifyHMAC takes a registrationID, timestamp, and a base64url encoded
+// HMAC-SHA256 hash and attempts to match the given HMAC by computing a new HMAC
+// with the SFE's UnpauseKey, regID, and timestamp. If a match is found, the
+// Subscriber's account can be unpaused, otherwise an error is returned.
+func (sfe *SelfServiceFrontEndImpl) verifyHMAC(regID string, ts time.Time, hash string) error {
+
+	return nil
 }
