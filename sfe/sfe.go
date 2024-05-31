@@ -1,6 +1,9 @@
 package sfe
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"errors"
@@ -270,11 +273,34 @@ func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, reques
 		// unpausing.
 		renderTemplate(response, tmplUnpauseNoParams, nil)
 	} else if request.Method == http.MethodGet && len(request.URL.Query()) == 2 {
-		params, err := sfe.parseAndValidateUnpauseParams(request)
+		base64Data := request.URL.Query().Get("data")
+		if base64Data == "" {
+			return
+		}
 
-		ok := sfe.stillFresh(params.ts)
+		unpauseParams, err := sfe.parseAndValidateUnpauseParams(base64Data)
+		if err != nil {
+			return
+		}
+
+		ok := sfe.stillFresh(unpauseParams.ts)
 		if !ok {
 			renderTemplate(response, tmplUnpauseExpired, nil)
+		}
+
+		base64HMAC := request.URL.Query().Get("hmac")
+		if base64HMAC == "" {
+			return
+		}
+
+		wfeHMACBytes, err := base64.RawURLEncoding.DecodeString(base64HMAC)
+		if err != nil {
+			return
+		}
+
+		ok = sfe.verifyHMAC(unpauseParams.version, unpauseParams.regID, unpauseParams.ts, wfeHMACBytes)
+		if !ok {
+			return
 		}
 
 		// Serve the actual unpause page given to a Subscriber. Allows
@@ -361,11 +387,15 @@ func (sfe *SelfServiceFrontEndImpl) stillFresh(timestamp time.Time) bool {
 	return sfe.clk.Since(timestamp) > sfe.unpauseStaleWindow
 }
 
-// verifyHMAC takes a registrationID, timestamp, and a base64url encoded
-// HMAC-SHA256 hash and attempts to match the given HMAC by computing a new HMAC
-// with the SFE's UnpauseKey, regID, and timestamp. If a match is found, the
-// Subscriber's account can be unpaused, otherwise an error is returned.
-func (sfe *SelfServiceFrontEndImpl) verifyHMAC(regID string, ts time.Time, hash string) error {
+// verifyHMAC takes a version, registrationID, timestamp, and a base64url
+// encoded HMAC-SHA256 hash and compares the HMAC provided by the WFE with a
+// newly computed HMAC using the SFEs unpause secret key. If a match is found,
+// the Subscriber account can be unpaused, otherwise it will remain paused.
+func (sfe *SelfServiceFrontEndImpl) verifyHMAC(version string, regID int64, ts time.Time, wfeHMAC []byte) bool {
+	hmac := hmac.New(sha256.New, []byte(sfe.unpauseKey))
+	sfeData := version + "." + string(regID) + "." + ts.String()
+	hmac.Write([]byte(sfeData))
+	sfeHMAC := hmac.Sum(nil)
 
-	return nil
+	return bytes.Equal(sfeHMAC, wfeHMAC)
 }
