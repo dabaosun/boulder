@@ -2,10 +2,13 @@ package sfe
 
 import (
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -30,10 +33,14 @@ var (
 
 	//go:embed all:templates all:pages
 	dynamicFS embed.FS
-)
 
-// HTML pages to-be-served by the SFE
-var tmplIndex, tmplUnpausePost, tmplUnpauseParams, tmplUnpauseNoParams *template.Template
+	// HTML pages to-be-served by the SFE
+	tmplIndex           *template.Template
+	tmplUnpausePost     *template.Template
+	tmplUnpauseParams   *template.Template
+	tmplUnpauseNoParams *template.Template
+	tmplUnpauseExpired  *template.Template
+)
 
 // Parse the files once at startup to avoid each request causing the server to
 // JIT parse. The pages are stored in an in-memory embed.FS to prevent
@@ -43,7 +50,7 @@ func init() {
 	tmplUnpausePost = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-post.html"))
 	tmplUnpauseParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-params.html"))
 	tmplUnpauseNoParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-noParams.html"))
-
+	tmplUnpauseExpired = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-expired.html"))
 }
 
 var errIncompleteGRPCResponse = errors.New("incomplete gRPC response message")
@@ -71,6 +78,10 @@ type SelfServiceFrontEndImpl struct {
 	// unpauseKey is an HMAC-SHA256 key used for verifying the HMAC included in
 	// each unpause request.
 	unpauseKey string
+
+	// unpauseStaleWindow is the amount of time an unpause URL is considered
+	// "fresh" before returning an error to a client.
+	unpauseStaleWindow time.Duration
 }
 
 // NewSelfServiceFrontEndImpl constructs a web service for Boulder
@@ -82,19 +93,21 @@ func NewSelfServiceFrontEndImpl(
 	rac rapb.RegistrationAuthorityClient,
 	sac sapb.StorageAuthorityReadOnlyClient,
 	unpauseKey string,
+	unpauseStaleWindow time.Duration,
 	limiter *ratelimits.Limiter,
 	txnBuilder *ratelimits.TransactionBuilder,
 ) (SelfServiceFrontEndImpl, error) {
 
 	sfe := SelfServiceFrontEndImpl{
-		log:            logger,
-		clk:            clk,
-		requestTimeout: requestTimeout,
-		ra:             rac,
-		sa:             sac,
-		limiter:        limiter,
-		txnBuilder:     txnBuilder,
-		unpauseKey:     unpauseKey,
+		log:                logger,
+		clk:                clk,
+		requestTimeout:     requestTimeout,
+		ra:                 rac,
+		sa:                 sac,
+		limiter:            limiter,
+		txnBuilder:         txnBuilder,
+		unpauseKey:         unpauseKey,
+		unpauseStaleWindow: unpauseStaleWindow,
 	}
 
 	return sfe, nil
@@ -178,6 +191,12 @@ func (sfe *SelfServiceFrontEndImpl) HandleFunc(mux *http.ServeMux, pattern strin
 }
 */
 
+const (
+	// The API version should be checked when parsing paramters to quickly deny
+	// a client request. Can be used to mass-invalidate URLs.
+	unpausePath = "/sfe/v1/unpause"
+)
+
 // Handler returns an http.Handler that uses various functions for various
 // non-ACME-specified paths. Each endpoint should have a corresponding HTML
 // page that shares the same name as the endpoint.
@@ -189,7 +208,11 @@ func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTT
 
 	m.Handle("GET /static/", staticAssetsHandler)
 	m.HandleFunc("/", sfe.Index)
-	m.HandleFunc("/unpause", sfe.Unpause)
+
+	// A "version" parameter is also sent by the WFE and used as a quick
+	// bail-out if it doesn't match the path.
+	m.HandleFunc(unpausePath, sfe.Unpause)
+
 	m.HandleFunc("GET /build", sfe.BuildID)
 
 	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
@@ -198,7 +221,7 @@ func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTT
 // renderTemplate takes an HTML template instantiated by the SFE init() and an
 // optional dynamicData which are rendered and served back to the client via the
 // response writer.
-func renderTemplate(w http.ResponseWriter, tmpl *template.Template, dynamicData []string) {
+func renderTemplate(w http.ResponseWriter, tmpl *template.Template, dynamicData map[string]string) {
 	if tmpl == nil {
 		http.Error(w, "Template does not exist", http.StatusInternalServerError)
 		return
@@ -212,7 +235,7 @@ func renderTemplate(w http.ResponseWriter, tmpl *template.Template, dynamicData 
 
 // Index is the homepage of the SFE
 func (sfe *SelfServiceFrontEndImpl) Index(response http.ResponseWriter, request *http.Request) {
-	if request.Method != "GET" && request.Method != "HEAD" {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		response.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -236,32 +259,106 @@ func (sfe *SelfServiceFrontEndImpl) BuildID(response http.ResponseWriter, reques
 func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, request *http.Request) {
 	sfe.log.AuditInfof("Got here via %s", request.Method)
 
-	if request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST" {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodPost {
 		response.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST")
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	if request.Method == "GET" && len(request.URL.Query()) <= 0 {
+	if request.Method == http.MethodGet && len(request.URL.Query()) <= 0 {
 		// For relying parties who stumble across this page. Doesn't allow
 		// unpausing.
 		renderTemplate(response, tmplUnpauseNoParams, nil)
-	} else if request.Method == "GET" {
+	} else if request.Method == http.MethodGet && len(request.URL.Query()) == 2 {
+		params, err := sfe.parseAndValidateUnpauseParams(request)
+
+		ok := sfe.stillFresh(params.ts)
+		if !ok {
+			renderTemplate(response, tmplUnpauseExpired, nil)
+		}
+
 		// Serve the actual unpause page given to a Subscriber. Allows
 		// unpausing.
 		renderTemplate(response, tmplUnpauseParams, nil)
-	} else if request.Method == "POST" {
+	} else if request.Method == http.MethodGet {
+		//
+	} else if request.Method == http.MethodPost {
 		// After clicking unpause, serve another page indicating that the
 		// Subscriber should re-attempt issuance.
 		renderTemplate(response, tmplUnpausePost, nil)
 	}
 }
 
-// stillFresh verifies a given timestamp's "freshness", ensuring it is within a
-// predefined window to prevent replay attacks.
-func stillFresh(ts time.Time) error {
+type unpauseParams struct {
+	// Unpause API version
+	version string
 
-	return nil
+	// Registration ID of the eventually to-be-unpaused account
+	regID int64
+
+	// Timestamp supplied by the WFE when it generated the unpause URL
+	ts time.Time
+}
+
+// parseAndValidateUnpauseParams takes a base64 url-encoded string, decodes it,
+// and parses out parameters from it. It returns the parameters or an error if
+// any validation checks on the parameters fail.
+//
+// Validation checks include:
+//  1. Check that the base64 decoded string contains 3 parameters in the form of
+//     <version>.<registrationID>.<RFC3339 Timestamp>
+//  2. If any parameter is missing or empty, exit
+//  3. Check that the <version> matches the API endpoint version
+func (sfe *SelfServiceFrontEndImpl) parseAndValidateUnpauseParams(input string) (*unpauseParams, error) {
+	b64DecodedParams, err := base64.RawURLEncoding.DecodeString(input)
+	if err != nil {
+		return nil, fmt.Errorf("Parameters were not base64url-encoded or contained padding: %s", err)
+	}
+
+	parts := strings.Split(string(b64DecodedParams), ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("Expected 3 parameters, received %d", len(parts))
+	}
+
+	version := parts[0]
+	if version == "" {
+		// This shouldn't happen because of the split check above.
+		return nil, errors.New("Expected version, but received empty string")
+	}
+
+	versionSlug := strings.Split(unpausePath, "/")
+	if len(versionSlug) != 4 {
+		// This shouldn't happen because we control the unpausePath. If it does,
+		// then it's an internal server error.
+		return nil, errors.New("I can't believe we've done this.")
+	}
+	if version != versionSlug[2] {
+		return nil, fmt.Errorf("Client sent a %s request to a %s endpoint", version, versionSlug[1])
+	}
+
+	parsedRegID := parts[1]
+	regID, err := strconv.ParseInt(parsedRegID, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	parsedTimestamp := parts[2]
+	timestamp, err := time.Parse(time.RFC3339, parsedTimestamp)
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing timestamp: %w", err)
+	}
+
+	return &unpauseParams{
+		version: version,
+		regID:   regID,
+		ts:      timestamp,
+	}, nil
+}
+
+// stillFresh checks a timestamp for "freshness", ensuring it falls within a
+// predefined window to prevent replay attacks.
+func (sfe *SelfServiceFrontEndImpl) stillFresh(timestamp time.Time) bool {
+	return sfe.clk.Since(timestamp) > sfe.unpauseStaleWindow
 }
 
 // verifyHMAC takes a registrationID, timestamp, and a base64url encoded

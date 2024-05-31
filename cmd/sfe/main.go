@@ -57,12 +57,18 @@ type Config struct {
 		RAService *cmd.GRPCClientConfig
 		SAService *cmd.GRPCClientConfig
 
-		// UnpauseKey is a secret used for deriving the prefix of each unpause
-		// request. It should contain 256 bits of random data to be suitable as
-		// an HMAC-SHA256 key (e.g. the output of `openssl rand -hex 32`). In a
-		// multi-DC deployment this value should be the same across all
-		// boulder-wfe and sfe instances.
-		UnpauseKey cmd.PasswordConfig `validate:"-"`
+		Unpause struct {
+			// Key is a secret used for deriving the prefix of each unpause
+			// request. It should contain 256 bits of random data to be suitable as
+			// an HMAC-SHA256 key (e.g. the output of `openssl rand -hex 32`). In a
+			// multi-DC deployment this value should be the same across all
+			// boulder-wfe and sfe instances.
+			Key cmd.PasswordConfig `validate:"-"`
+
+			// StaleWindow is the amount of time an unpause URL is considered
+			// "fresh" before returning an error to a client.
+			StaleWindow config.Duration `validate:"-"`
+		}
 
 		Features features.Config
 
@@ -103,12 +109,12 @@ type CacheConfig struct {
 
 func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient, string) {
 	var unpauseKey string
-	if c.SFE.UnpauseKey.PasswordFile != "" {
+	if c.SFE.Unpause.Key.PasswordFile != "" {
 		var err error
-		unpauseKey, err = c.SFE.UnpauseKey.Pass()
+		unpauseKey, err = c.SFE.Unpause.Key.Pass()
 		cmd.FailOnError(err, "Failed to load unpauseKey")
-		if len(unpauseKey) <= 0 {
-			cmd.FailOnError(err, "unpauseKey must not be empty")
+		if unpauseKey == "" {
+			cmd.Fail("unpauseKey must not be empty")
 		}
 	}
 
@@ -202,6 +208,7 @@ func main() {
 		rac,
 		sac,
 		unpauseKey,
+		c.SFE.Unpause.StaleWindow.Duration,
 		limiter,
 		txnBuilder,
 	)
