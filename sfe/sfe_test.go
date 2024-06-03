@@ -3,10 +3,6 @@ package sfe
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,14 +15,11 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/letsencrypt/boulder/cmd"
 	"github.com/letsencrypt/boulder/core"
 	"github.com/letsencrypt/boulder/features"
 	blog "github.com/letsencrypt/boulder/log"
 	"github.com/letsencrypt/boulder/metrics"
 	"github.com/letsencrypt/boulder/mocks"
-	"github.com/letsencrypt/boulder/ratelimits"
-	bredis "github.com/letsencrypt/boulder/redis"
 	"github.com/letsencrypt/boulder/revocation"
 	"github.com/letsencrypt/boulder/test"
 
@@ -117,36 +110,6 @@ func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 
 	mockSA := mocks.NewStorageAuthorityReadOnly(fc)
 
-	log := blog.NewMock()
-
-	// Setup rate limiting.
-	rc := bredis.Config{
-		Username: "unittest-rw",
-		TLS: cmd.TLSConfig{
-			CACertFile: "../test/certs/ipki/minica.pem",
-			CertFile:   "../test/certs/ipki/localhost/cert.pem",
-			KeyFile:    "../test/certs/ipki/localhost/key.pem",
-		},
-		Lookups: []cmd.ServiceDomain{
-			{
-				Service: "redisratelimits",
-				Domain:  "service.consul",
-			},
-		},
-		LookupDNSAuthority: "consul.service.consul",
-	}
-	rc.PasswordConfig = cmd.PasswordConfig{
-		PasswordFile: "../test/secrets/ratelimits_redis_password",
-	}
-	ring, err := bredis.NewRingFromConfig(rc, stats, log)
-	test.AssertNotError(t, err, "making redis ring client")
-	source := ratelimits.NewRedisSource(ring.Ring, fc, stats)
-	test.AssertNotNil(t, source, "source should not be nil")
-	limiter, err := ratelimits.NewLimiter(fc, source, stats)
-	test.AssertNotError(t, err, "making limiter")
-	txnBuilder, err := ratelimits.NewTransactionBuilder("../test/config-next/wfe2-ratelimit-defaults.yml", "")
-	test.AssertNotError(t, err, "making transaction composer")
-
 	sfe, err := NewSelfServiceFrontEndImpl(
 		stats,
 		fc,
@@ -154,10 +117,6 @@ func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 		10*time.Second,
 		&MockRegistrationAuthority{},
 		mockSA,
-		"pleaseLetMeBackIn",
-		3*24*time.Hour,
-		limiter,
-		txnBuilder,
 	)
 	test.AssertNotError(t, err, "Unable to create WFE")
 
@@ -190,76 +149,4 @@ func TestIndex(t *testing.T) {
 		test.AssertEquals(t, responseWriter.Body.String(), "404 page not found\n")
 		test.AssertEquals(t, responseWriter.Header().Get("Cache-Control"), "")
 	*/
-}
-
-func TestParseAndValidateUnpauseParams(t *testing.T) {
-	sfe, _ := setupSFE(t)
-
-	ts := time.Now().AddDate(0, 0, -1).Format(time.RFC3339)
-	createdAt, err := time.Parse(time.RFC3339, ts)
-	fmt.Printf("createdAt: %v\n", createdAt)
-	test.AssertNotError(t, err, "Could not create timestamp")
-	version := "v1"
-	regID := int64(1)
-
-	ogParams := &unpauseParams{
-		version:   version,
-		regID:     regID,
-		timestamp: createdAt,
-	}
-
-	// The WFE generates this string and provides it to the Subscriber via a URL
-	// parameter.
-	unpauseRequest := base64.RawURLEncoding.EncodeToString([]byte(version + "." + fmt.Sprint(regID) + "." + createdAt.String()))
-
-	parsedParams, err := sfe.parseAndValidateUnpauseParams(unpauseRequest)
-	test.AssertNotError(t, err, "Could not parse and validate unpause params from input string")
-	test.AssertNotNil(t, parsedParams, "unpauseParam was nil")
-
-	test.AssertDeepEquals(t, ogParams, parsedParams)
-}
-
-func TestVerifyHMAC(t *testing.T) {
-	sfe, _ := setupSFE(t)
-
-	createdAt := time.Now().AddDate(0, 0, -1).Unix()
-	version := "v1"
-	regID := int64(1)
-
-	// The SFE and WFE share an unpause key
-	hash := hmac.New(sha256.New, []byte(sfe.unpauseKey))
-	hash.Write([]byte(version + "." + fmt.Sprint(regID) + "." + fmt.Sprint(createdAt)))
-	wfeHMAC := hash.Sum(nil)
-
-	testCases := []struct {
-		name        string
-		params      *unpauseParams
-		expectError bool
-	}{
-		{
-			name:   "hmac matches",
-			params: &unpauseParams{version: version, regID: regID, timestamp: createdAt},
-		},
-		{
-			name:        "hmac doesnt match",
-			params:      &unpauseParams{version: "v2", regID: regID, timestamp: createdAt},
-			expectError: true,
-		},
-		{
-			name:        "unpauseParams are nil",
-			params:      nil,
-			expectError: true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ok := sfe.verifyHMAC(tc.params, wfeHMAC)
-			if tc.expectError {
-				test.Assert(t, !ok, "HMAC should not have matched, but did")
-			} else {
-				test.Assert(t, ok, "HMAC should have matched, but did not")
-			}
-		})
-	}
 }

@@ -19,8 +19,6 @@ import (
 	bgrpc "github.com/letsencrypt/boulder/grpc"
 	blog "github.com/letsencrypt/boulder/log"
 	rapb "github.com/letsencrypt/boulder/ra/proto"
-	"github.com/letsencrypt/boulder/ratelimits"
-	bredis "github.com/letsencrypt/boulder/redis"
 	sapb "github.com/letsencrypt/boulder/sa/proto"
 	"github.com/letsencrypt/boulder/sfe"
 )
@@ -57,42 +55,7 @@ type Config struct {
 		RAService *cmd.GRPCClientConfig
 		SAService *cmd.GRPCClientConfig
 
-		Unpause struct {
-			// Key is a secret used for deriving the prefix of each unpause
-			// request. It should contain 256 bits of random data to be suitable as
-			// an HMAC-SHA256 key (e.g. the output of `openssl rand -hex 32`). In a
-			// multi-DC deployment this value should be the same across all
-			// boulder-wfe and sfe instances.
-			Key cmd.PasswordConfig `validate:"-"`
-
-			// StaleWindow is the amount of time an unpause URL is considered
-			// "fresh" before returning an error to a client.
-			StaleWindow config.Duration `validate:"-"`
-		}
-
 		Features features.Config
-
-		Limiter struct {
-			// Redis contains the configuration necessary to connect to Redis
-			// for rate limiting. This field is required to enable rate
-			// limiting.
-			Redis *bredis.Config `validate:"required_with=Defaults"`
-
-			// Defaults is a path to a YAML file containing default rate limits.
-			// See: ratelimits/README.md for details. This field is required to
-			// enable rate limiting. If any individual rate limit is not set,
-			// that limit will be disabled. Failed Authorizations limits passed
-			// in this file must be identical to those in the RA.
-			Defaults string `validate:"required_with=Redis"`
-
-			// Overrides is a path to a YAML file containing overrides for the
-			// default rate limits. See: ratelimits/README.md for details. If
-			// this field is not set, all requesters will be subject to the
-			// default rate limits. Overrides for the Failed Authorizations
-			// overrides passed in this file must be identical to those in the
-			// RA.
-			Overrides string
-		}
 	}
 
 	Syslog        cmd.SyslogConfig
@@ -107,17 +70,7 @@ type CacheConfig struct {
 	TTL  config.Duration
 }
 
-func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient, string) {
-	var unpauseKey string
-	if c.SFE.Unpause.Key.PasswordFile != "" {
-		var err error
-		unpauseKey, err = c.SFE.Unpause.Key.Pass()
-		cmd.FailOnError(err, "Failed to load unpauseKey")
-		if unpauseKey == "" {
-			cmd.Fail("unpauseKey must not be empty")
-		}
-	}
-
+func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient) {
 	tlsConfig, err := c.SFE.TLS.Load(scope)
 	cmd.FailOnError(err, "TLS config")
 
@@ -129,7 +82,7 @@ func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.Regi
 	cmd.FailOnError(err, "Failed to load credentials and create gRPC connection to SA")
 	sac := sapb.NewStorageAuthorityReadOnlyClient(saConn)
 
-	return rac, sac, unpauseKey
+	return rac, sac
 }
 
 type errorWriter struct {
@@ -183,22 +136,7 @@ func main() {
 
 	clk := cmd.Clock()
 
-	rac, sac, unpauseKey := setupSFE(c, stats, clk)
-
-	var limiter *ratelimits.Limiter
-	var txnBuilder *ratelimits.TransactionBuilder
-	var limiterRedis *bredis.Ring
-	if c.SFE.Limiter.Defaults != "" {
-		// Setup rate limiting.
-		limiterRedis, err = bredis.NewRingFromConfig(*c.SFE.Limiter.Redis, stats, logger)
-		cmd.FailOnError(err, "Failed to create Redis ring")
-
-		source := ratelimits.NewRedisSource(limiterRedis.Ring, clk, stats)
-		limiter, err = ratelimits.NewLimiter(clk, source, stats)
-		cmd.FailOnError(err, "Failed to create rate limiter")
-		txnBuilder, err = ratelimits.NewTransactionBuilder(c.SFE.Limiter.Defaults, c.SFE.Limiter.Overrides)
-		cmd.FailOnError(err, "Failed to create rate limits transaction builder")
-	}
+	rac, sac := setupSFE(c, stats, clk)
 
 	sfei, err := sfe.NewSelfServiceFrontEndImpl(
 		stats,
@@ -207,10 +145,6 @@ func main() {
 		c.SFE.Timeout.Duration,
 		rac,
 		sac,
-		unpauseKey,
-		c.SFE.Unpause.StaleWindow.Duration,
-		limiter,
-		txnBuilder,
 	)
 	cmd.FailOnError(err, "Unable to create SFE")
 	sfei.AllowOrigins = c.SFE.AllowOrigins
@@ -261,7 +195,6 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 		_ = tlsSrv.Shutdown(ctx)
-		limiterRedis.StopLookups()
 		oTelShutdown(ctx)
 	}()
 
