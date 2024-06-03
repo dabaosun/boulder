@@ -3,6 +3,10 @@ package sfe
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -150,7 +154,8 @@ func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 		10*time.Second,
 		&MockRegistrationAuthority{},
 		mockSA,
-		"unpauseKeyLol",
+		"pleaseLetMeBackIn",
+		3*24*time.Hour,
 		limiter,
 		txnBuilder,
 	)
@@ -185,4 +190,76 @@ func TestIndex(t *testing.T) {
 		test.AssertEquals(t, responseWriter.Body.String(), "404 page not found\n")
 		test.AssertEquals(t, responseWriter.Header().Get("Cache-Control"), "")
 	*/
+}
+
+func TestParseAndValidateUnpauseParams(t *testing.T) {
+	sfe, _ := setupSFE(t)
+
+	ts := time.Now().AddDate(0, 0, -1).Format(time.RFC3339)
+	createdAt, err := time.Parse(time.RFC3339, ts)
+	fmt.Printf("createdAt: %v\n", createdAt)
+	test.AssertNotError(t, err, "Could not create timestamp")
+	version := "v1"
+	regID := int64(1)
+
+	ogParams := &unpauseParams{
+		version:   version,
+		regID:     regID,
+		timestamp: createdAt,
+	}
+
+	// The WFE generates this string and provides it to the Subscriber via a URL
+	// parameter.
+	unpauseRequest := base64.RawURLEncoding.EncodeToString([]byte(version + "." + fmt.Sprint(regID) + "." + createdAt.String()))
+
+	parsedParams, err := sfe.parseAndValidateUnpauseParams(unpauseRequest)
+	test.AssertNotError(t, err, "Could not parse and validate unpause params from input string")
+	test.AssertNotNil(t, parsedParams, "unpauseParam was nil")
+
+	test.AssertDeepEquals(t, ogParams, parsedParams)
+}
+
+func TestVerifyHMAC(t *testing.T) {
+	sfe, _ := setupSFE(t)
+
+	createdAt := time.Now().AddDate(0, 0, -1).Unix()
+	version := "v1"
+	regID := int64(1)
+
+	// The SFE and WFE share an unpause key
+	hash := hmac.New(sha256.New, []byte(sfe.unpauseKey))
+	hash.Write([]byte(version + "." + fmt.Sprint(regID) + "." + fmt.Sprint(createdAt)))
+	wfeHMAC := hash.Sum(nil)
+
+	testCases := []struct {
+		name        string
+		params      *unpauseParams
+		expectError bool
+	}{
+		{
+			name:   "hmac matches",
+			params: &unpauseParams{version: version, regID: regID, timestamp: createdAt},
+		},
+		{
+			name:        "hmac doesnt match",
+			params:      &unpauseParams{version: "v2", regID: regID, timestamp: createdAt},
+			expectError: true,
+		},
+		{
+			name:        "unpauseParams are nil",
+			params:      nil,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok := sfe.verifyHMAC(tc.params, wfeHMAC)
+			if tc.expectError {
+				test.Assert(t, !ok, "HMAC should not have matched, but did")
+			} else {
+				test.Assert(t, ok, "HMAC should have matched, but did not")
+			}
+		})
+	}
 }
