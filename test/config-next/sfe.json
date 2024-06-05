@@ -7,6 +7,12 @@
 			"*"
 		],
 		"shutdownStopTimeout": "10s",
+		"unpause": {
+			"key": {
+				"passwordFile": "test/secrets/sfe_unpause_secret_key"
+			},
+			"staleWindow": "72h"
+		},
 		"tls": {
 			"caCertFile": "test/certs/ipki/minica.pem",
 			"certFile": "test/certs/ipki/sfe.boulder/cert.pem",
@@ -31,30 +37,6 @@
 			"timeout": "15s",
 			"noWaitForReady": true,
 			"hostOverride": "sa.boulder"
-		},
-		"limiter": {
-			"redis": {
-				"username": "sfe",
-				"passwordFile": "test/secrets/wfe_ratelimits_redis_password",
-				"lookups": [
-					{
-						"Service": "redisratelimits",
-						"Domain": "service.consul"
-					}
-				],
-				"lookupDNSAuthority": "consul.service.consul",
-				"readTimeout": "250ms",
-				"writeTimeout": "250ms",
-				"poolSize": 100,
-				"routeRandomly": true,
-				"tls": {
-					"caCertFile": "test/certs/ipki/minica.pem",
-					"certFile": "test/certs/ipki/sfe.boulder/cert.pem",
-					"keyFile": "test/certs/ipki/sfe.boulder/key.pem"
-				}
-			},
-			"Defaults": "test/config-next/wfe2-ratelimit-defaults.yml",
-			"Overrides": "test/config-next/wfe2-ratelimit-overrides.yml"
 		},
 		"features": {}
 	},

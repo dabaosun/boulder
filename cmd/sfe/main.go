@@ -55,6 +55,19 @@ type Config struct {
 		RAService *cmd.GRPCClientConfig
 		SAService *cmd.GRPCClientConfig
 
+		Unpause struct {
+			// Key is a secret used for deriving the prefix of each unpause
+			// request. It should contain 256 bits of random data to be suitable as
+			// an HMAC-SHA256 key (e.g. the output of `openssl rand -hex 32`). In a
+			// multi-DC deployment this value should be the same across all
+			// boulder-wfe and sfe instances.
+			Key cmd.PasswordConfig `validate:"-"`
+
+			// StaleWindow is the amount of time an unpause URL is considered
+			// "fresh" before returning an error to a client.
+			StaleWindow config.Duration `validate:"-"`
+		}
+
 		Features features.Config
 	}
 
@@ -70,7 +83,17 @@ type CacheConfig struct {
 	TTL  config.Duration
 }
 
-func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient) {
+func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.RegistrationAuthorityClient, sapb.StorageAuthorityReadOnlyClient, string) {
+	var unpauseKey string
+	if c.SFE.Unpause.Key.PasswordFile != "" {
+		var err error
+		unpauseKey, err = c.SFE.Unpause.Key.Pass()
+		cmd.FailOnError(err, "Failed to load unpauseKey")
+		if unpauseKey == "" {
+			cmd.Fail("unpauseKey must not be empty")
+		}
+	}
+
 	tlsConfig, err := c.SFE.TLS.Load(scope)
 	cmd.FailOnError(err, "TLS config")
 
@@ -82,7 +105,7 @@ func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.Regi
 	cmd.FailOnError(err, "Failed to load credentials and create gRPC connection to SA")
 	sac := sapb.NewStorageAuthorityReadOnlyClient(saConn)
 
-	return rac, sac
+	return rac, sac, unpauseKey
 }
 
 type errorWriter struct {
@@ -136,7 +159,7 @@ func main() {
 
 	clk := cmd.Clock()
 
-	rac, sac := setupSFE(c, stats, clk)
+	rac, sac, unpauseKey := setupSFE(c, stats, clk)
 
 	sfei, err := sfe.NewSelfServiceFrontEndImpl(
 		stats,
@@ -145,6 +168,8 @@ func main() {
 		c.SFE.Timeout.Duration,
 		rac,
 		sac,
+		unpauseKey,
+		c.SFE.Unpause.StaleWindow.Duration,
 	)
 	cmd.FailOnError(err, "Unable to create SFE")
 	sfei.AllowOrigins = c.SFE.AllowOrigins
