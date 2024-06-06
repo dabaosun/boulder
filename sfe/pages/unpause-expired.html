@@ -1,16 +1,19 @@
-{{ define "title" }}Unpause - Self-Service Frontend{{ end }}
+<!doctype html>
+<html dir="ltr" lang="en-US">
+    <header>
+        <title>Unpause - Self-Service Frontend</title>
+        {{ template "meta" }}
+    </header>
+    <body>
+        <div>
+        <h1>Unpause Request URL Expired</h1>
 
-{{ define "body" }}
-<div>
-    <h1>Unpause Request URL Expired</h1>
-
-    <p>
+        <p>
         Your unpause request URL is too old and will not be processed. Request
         URLs are only valid for a short period of time. Fail another issuance to
         receive a fresh unpause request URL. 
-    </p>
+        </p>
+        </div>
+    </body>
 
-</div>
-{{ end }}
-
-{{template "layout"}}
+{{template "footer"}}

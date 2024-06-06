@@ -3,6 +3,7 @@ package sfe
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/http"
@@ -106,8 +107,8 @@ func (ra *MockRegistrationAuthority) FinalizeOrder(ctx context.Context, in *rapb
 	return in.Order, nil
 }
 
-// openssl rand -hex 32
-const unpauseKey = "98aa2cf2d463f3a5cdf8073435cb73de494b03592cc695c775a969b329f42729"
+// openssl rand -hex 16
+const unpauseKey = "42c812bab780e38f80cc9578cebe3f96"
 
 func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 	features.Reset()
@@ -166,12 +167,14 @@ func TestIndex(t *testing.T) {
 // makeJWTForAccount is a standin for a WFE method that returns an unpauseJWT or
 // an error. The JWT contains a set of claims which should be validated by the
 // caller.
-func makeJWTForAccount(notBefore time.Time, issuedAt time.Time, expiresAt time.Time, key []byte, regID int64) (unpauseJWT, error) {
-	if key == nil {
-		return "", errors.New("unable to create JWT")
+func makeJWTForAccount(notBefore time.Time, issuedAt time.Time, expiresAt time.Time, seed []byte, regID int64) (unpauseJWT, error) {
+	// A seed must be at least 16 bytes (32 elements) or go-jose will panic.
+	if len(seed) != 32 {
+		return "", errors.New("seed length invalid")
 	}
 
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: key}, (&jose.SignerOptions{}).WithType("JWT"))
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: privateKey}, (&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		return "", fmt.Errorf("making signer: %s", err)
 	}
@@ -205,6 +208,7 @@ func TestValidateJWT(t *testing.T) {
 	t.Parallel()
 	sfe, fc := setupSFE(t)
 
+	now := fc.Now()
 	originalClock := fc
 	testCases := []struct {
 		Name                        string
@@ -218,56 +222,56 @@ func TestValidateJWT(t *testing.T) {
 	}{
 		{
 			Name:       "valid",
-			IssuedAt:   fc.Now(),
-			NotBefore:  fc.Now().Add(5 * time.Minute),
-			ExpiresAt:  fc.Now().Add(30 * time.Minute),
+			IssuedAt:   now,
+			NotBefore:  now.Add(5 * time.Minute),
+			ExpiresAt:  now.Add(30 * time.Minute),
 			UnpauseKey: unpauseKey,
 			RegID:      1,
 		},
 		{
 			Name:                        "creating JWT with empty key fails",
-			IssuedAt:                    fc.Now(),
-			NotBefore:                   fc.Now().Add(5 * time.Minute),
-			ExpiresAt:                   fc.Now().Add(30 * time.Minute),
+			IssuedAt:                    now,
+			NotBefore:                   now.Add(5 * time.Minute),
+			ExpiresAt:                   now.Add(30 * time.Minute),
 			UnpauseKey:                  "",
 			RegID:                       1,
-			ExpectedMakeJWTSubstr:       "invalid key size for algorithm",
+			ExpectedMakeJWTSubstr:       "seed length invalid",
 			ExpectedValidationErrSubstr: "JWS format must have",
 		},
 		{
 			Name:                        "creating JWT with invalid key size fails",
-			IssuedAt:                    fc.Now(),
-			NotBefore:                   fc.Now().Add(5 * time.Minute),
-			ExpiresAt:                   fc.Now().Add(30 * time.Minute),
-			UnpauseKey:                  "1234567890",
+			IssuedAt:                    now,
+			NotBefore:                   now.Add(5 * time.Minute),
+			ExpiresAt:                   now.Add(30 * time.Minute),
+			UnpauseKey:                  "12",
 			RegID:                       1,
-			ExpectedMakeJWTSubstr:       "invalid key size for algorithm",
+			ExpectedMakeJWTSubstr:       "seed length invalid",
 			ExpectedValidationErrSubstr: "JWS format must have",
 		},
 		{
 			Name:                        "registration ID is required to pass validation",
-			IssuedAt:                    fc.Now(),
-			NotBefore:                   fc.Now().Add(5 * time.Minute),
-			ExpiresAt:                   fc.Now().Add(30 * time.Minute),
+			IssuedAt:                    now,
+			NotBefore:                   now.Add(5 * time.Minute),
+			ExpiresAt:                   now.Add(24 * time.Hour),
 			UnpauseKey:                  unpauseKey,
 			RegID:                       0,
 			ExpectedValidationErrSubstr: "Registration ID required",
 		},
 		{
 			Name:                        "validating expired JWT fails",
-			IssuedAt:                    fc.Now(),
-			NotBefore:                   fc.Now().Add(5 * time.Minute),
-			ExpiresAt:                   fc.Now().Add(-24 * time.Hour),
+			IssuedAt:                    now,
+			NotBefore:                   now.Add(5 * time.Minute),
+			ExpiresAt:                   now.Add(-24 * time.Hour),
 			UnpauseKey:                  unpauseKey,
 			RegID:                       1,
 			ExpectedValidationErrSubstr: "token is expired (exp)",
 		},
 		{
-			Name:                        "validating JWT with different key fails",
-			IssuedAt:                    fc.Now(),
-			NotBefore:                   fc.Now().Add(5 * time.Minute),
-			ExpiresAt:                   fc.Now().Add(30 * time.Minute),
-			UnpauseKey:                  "xxxxxxxxxxyyyyyyyyyyzzzzzzzzzz12",
+			Name:                        "validating JWT with key derived from different seed fails",
+			IssuedAt:                    now,
+			NotBefore:                   now.Add(5 * time.Minute),
+			ExpiresAt:                   now.Add(30 * time.Minute),
+			UnpauseKey:                  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 			RegID:                       1,
 			ExpectedValidationErrSubstr: "cryptographic primitive",
 		},
@@ -283,7 +287,9 @@ func TestValidateJWT(t *testing.T) {
 				test.AssertNotError(t, err, "Should have been able to create a JWT")
 			}
 
-			// Advance the clock an arbitrary amount. The WFE sets a notBefore claim in the JWT
+			// Advance the clock an arbitrary amount. The WFE sets a notBefore
+			// claim in the JWT as a first pass annoyance for clients attempting
+			// to automate unpausing.
 			fc.Add(10 * time.Minute)
 			err = sfe.validateJWTforAccount(newJWT)
 			if tc.ExpectedValidationErrSubstr != "" || err != nil {

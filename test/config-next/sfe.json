@@ -9,7 +9,7 @@
 		"shutdownStopTimeout": "10s",
 		"unpause": {
 			"key": {
-				"passwordFile": "test/secrets/sfe_unpause_secret_key"
+				"passwordFile": "test/secrets/sfe_unpauseKey_seed"
 			}
 		},
 		"tls": {

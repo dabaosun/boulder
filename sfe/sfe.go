@@ -1,6 +1,7 @@
 package sfe
 
 import (
+	"crypto/ed25519"
 	"embed"
 	"errors"
 	"fmt"
@@ -34,20 +35,22 @@ var (
 	dynamicFS embed.FS
 
 	// HTML pages to-be-served by the SFE
-	tmplIndex           *template.Template
-	tmplUnpausePost     *template.Template
-	tmplUnpauseParams   *template.Template
-	tmplUnpauseNoParams *template.Template
+	//tmplIndex           *template.Template
+	//tmplUnpausePost     *template.Template
+	//tmplUnpauseParams   *template.Template
+	//tmplUnpauseNoParams *template.Template
+	tmplPages *template.Template
 )
 
 // Parse the files once at startup to avoid each request causing the server to
 // JIT parse. The pages are stored in an in-memory embed.FS to prevent
 // unnecessary filesystem I/O on a physical HDD.
 func init() {
-	tmplIndex = template.Must(template.New("index").ParseFS(dynamicFS, "templates/layout.html", "pages/index.html"))
-	tmplUnpausePost = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-post.html"))
-	tmplUnpauseParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-params.html"))
-	tmplUnpauseNoParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-noParams.html"))
+	//tmplIndex = template.Must(template.New("index").ParseFS(dynamicFS, "templates/layout.html", "pages/index.html"))
+	tmplPages = template.Must(template.New("pages").ParseFS(dynamicFS, "templates/layout.html", "pages/*"))
+	//bodyUnpausePost = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-post.html"))
+	//bodyUnpauseParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-params.html"))
+	//bodyUnpauseNoParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-noParams.html"))
 }
 
 var errIncompleteGRPCResponse = errors.New("incomplete gRPC response message")
@@ -69,10 +72,10 @@ type SelfServiceFrontEndImpl struct {
 	// CORS settings
 	AllowOrigins []string
 
-	// unpauseKey should contain 256 bits (32 bytes) of random data to be
-	// suitable as an HMAC-SHA256 key (e.g. the output of `openssl rand -hex
-	// 32`)
-	unpauseKey string
+	// unpauseKeySeed should contain 256 bits (32 bytes) of random data to be
+	// suitable as an Ed25519 go-jose seed (e.g. the output of `openssl rand
+	// -hex 32`)
+	unpauseKeySeed string
 }
 
 // NewSelfServiceFrontEndImpl constructs a web service for Boulder
@@ -83,13 +86,13 @@ func NewSelfServiceFrontEndImpl(
 	requestTimeout time.Duration,
 	rac rapb.RegistrationAuthorityClient,
 	sac sapb.StorageAuthorityReadOnlyClient,
-	unpauseKey string,
+	unpauseKeySeed string,
 ) (SelfServiceFrontEndImpl, error) {
 	// The SFE will be validating JWTs produced by the WFE which uses the HS256
 	// signing algorithm and must have at least as many bytes as the hash output
 	// of that algorithm.
-	if len(unpauseKey) < 32 {
-		return SelfServiceFrontEndImpl{}, errors.New("unpauseKey invalid size, should be at least 32 hexadecimal characters")
+	if len(unpauseKeySeed) != 32 {
+		return SelfServiceFrontEndImpl{}, errors.New("unpauseKey invalid size, should be 32 hexadecimal characters to match go-jose SeedSize")
 	}
 
 	sfe := SelfServiceFrontEndImpl{
@@ -98,7 +101,7 @@ func NewSelfServiceFrontEndImpl(
 		requestTimeout: requestTimeout,
 		ra:             rac,
 		sa:             sac,
-		unpauseKey:     unpauseKey,
+		unpauseKeySeed: unpauseKeySeed,
 	}
 
 	return sfe, nil
@@ -199,12 +202,8 @@ func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTT
 
 	m.Handle("GET /static/", staticAssetsHandler)
 	m.HandleFunc("/", sfe.Index)
-
-	// A "version" parameter is also sent by the WFE and used as a quick
-	// bail-out if it doesn't match the path.
-	m.HandleFunc(unpausePath, sfe.Unpause)
-
 	m.HandleFunc("GET /build", sfe.BuildID)
+	m.HandleFunc(unpausePath, sfe.Unpause)
 
 	return measured_http.New(m, sfe.clk, stats, oTelHTTPOptions...)
 }
@@ -212,13 +211,13 @@ func (sfe *SelfServiceFrontEndImpl) Handler(stats prometheus.Registerer, oTelHTT
 // renderTemplate takes an HTML template instantiated by the SFE init() and an
 // optional dynamicData which are rendered and served back to the client via the
 // response writer.
-func renderTemplate(w http.ResponseWriter, tmpl *template.Template, dynamicData any) {
-	if tmpl == nil {
-		http.Error(w, "Template does not exist", http.StatusInternalServerError)
+func renderTemplate(w http.ResponseWriter, subTmpl string, dynamicData any) {
+	if len(subTmpl) == 0 {
+		http.Error(w, "Template page does not exist", http.StatusInternalServerError)
 		return
 	}
 
-	err := tmpl.ExecuteTemplate(w, "layout", dynamicData)
+	err := tmplPages.ExecuteTemplate(w, subTmpl, dynamicData)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -232,7 +231,7 @@ func (sfe *SelfServiceFrontEndImpl) Index(response http.ResponseWriter, request 
 		return
 	}
 
-	renderTemplate(response, tmplIndex, nil)
+	renderTemplate(response, "index.html", nil)
 }
 
 // BuildID tells the requester what boulder build version is running.
@@ -263,10 +262,10 @@ func (sfe *SelfServiceFrontEndImpl) getHelper(response http.ResponseWriter, inco
 		// unpause form with the JWT from the URL. That JWT itself may be
 		// invalid or expired, but that validation will be performed only after
 		// submitting the form.
-		renderTemplate(response, tmplUnpauseParams, data)
+		renderTemplate(response, "unpause-params.html", data)
 	} else {
 		// We only want to accept requests containing the JWT param.
-		renderTemplate(response, tmplUnpauseNoParams, nil)
+		renderTemplate(response, "unpause-noParams.html", nil)
 	}
 }
 
@@ -285,9 +284,9 @@ func (sfe *SelfServiceFrontEndImpl) postHelper(response http.ResponseWriter, inc
 			data.ShouldUnpause = true
 		}
 
-		renderTemplate(response, tmplUnpausePost, data)
+		renderTemplate(response, "unpause-post.html", data)
 	} else {
-		renderTemplate(response, tmplUnpauseNoParams, nil)
+		renderTemplate(response, "unpause-noParams.html", nil)
 	}
 }
 
@@ -309,18 +308,20 @@ func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, reques
 	}
 }
 
-// validateJWT uses a shared symmetric between the SFE and WFE to validate the
-// signature and contents of an unpauseJWT and verify that the its claims match
-// a set of expected claims. Passing validations allows the Subscriber to
-// unpause their account, otherwise an error is returned.
+// validateJWT derives a ed25519 public key from a seed shared by the SFE and
+// WFE. The public key is used to validate the signature and contents of an
+// unpauseJWT and verify that the its claims match a set of expected claims.
+// Passing validations allows the Subscriber to unpause their account, otherwise
+// an error is returned.
 func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT) error {
-	token, err := jwt.ParseSigned(string(incomingJWT), []jose.SignatureAlgorithm{jose.HS256})
+	token, err := jwt.ParseSigned(string(incomingJWT), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
 		return fmt.Errorf("parsing JWT: %s", err)
 	}
 
+	pubKey := ed25519.NewKeyFromSeed([]byte(sfe.unpauseKeySeed)).Public()
 	incomingClaims := jwt.Claims{}
-	err = token.Claims([]byte(sfe.unpauseKey), &incomingClaims)
+	err = token.Claims(pubKey, &incomingClaims)
 	if err != nil {
 		return err
 	}

@@ -1,8 +1,12 @@
-{{ define "title" }}Unpause - Self-Service Frontend{{ end }}
-
-{{ define "body" }}
-<div>
-    {{ if eq .JWTValidationSuccessful true }}
+<!doctype html>
+<html dir="ltr" lang="en-US">
+    <header>
+        <title>Unpause - Self-Service Frontend</title>
+        {{ template "meta" }}
+    </header>
+    <body>
+    <div>
+    {{ if eq .ShouldUnpause true }}
     <h1>Your ACME Account Has Been Unpaused</h1>
 
     <p>To obtain a new certificate, re-attempt issuance with your ACME client. Future repeated validation failures with no successes will result in your account being paused again.</p>
@@ -12,7 +16,7 @@
     <p>There was an error unpausing your account. Re-attempt issuance to obtain a new unpause URL and perform this process again.</p>
     {{ end }}
 
-</div>
-{{ end }}
+    </div>
+</body>
 
-{{template "layout"}}
+{{template "footer"}}

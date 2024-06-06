@@ -1,7 +1,11 @@
-{{ define "title" }}Unpause - Self-Service Frontend{{ end }}
-
-{{ define "body" }}
-<div>
+<!doctype html>
+<html dir="ltr" lang="en-US">
+    <header>
+        <title>Unpause - Self-Service Frontend</title>
+        {{ template "meta" }}
+    </header>
+    <body>
+    <div>
     <h1>Action Required to Unpause Your ACME Account</h1>
 
     <p>
@@ -42,14 +46,13 @@
               <button class="primary" id="submit">Please Unpause My Account</button>
             </form>
         </div>
-
     <p>
         <strong>Note:</strong> This link is active for &lt;X&gt; more days. If
         you face difficulties or need more guidance, our <a
         href="https://community.letsencrypt.org">support forum</a> is a great
         resource for troubleshooting and advice.
     </p>
-</div>
-{{ end }}
+    </div>
+</body>
 
-{{template "layout"}}
+{{template "footer"}}
