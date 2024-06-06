@@ -3,12 +3,16 @@ package sfe
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/jmhodges/clock"
 	"golang.org/x/crypto/ocsp"
 	"google.golang.org/grpc"
@@ -102,10 +106,16 @@ func (ra *MockRegistrationAuthority) FinalizeOrder(ctx context.Context, in *rapb
 	return in.Order, nil
 }
 
+// openssl rand -hex 32
+const unpauseKey = "98aa2cf2d463f3a5cdf8073435cb73de494b03592cc695c775a969b329f42729"
+
 func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 	features.Reset()
 
 	fc := clock.NewFake()
+	// Set to some non-zero time.
+	fc.Set(time.Date(2020, 10, 10, 0, 0, 0, 0, time.UTC))
+
 	stats := metrics.NoopRegisterer
 
 	mockSA := mocks.NewStorageAuthorityReadOnly(fc)
@@ -117,6 +127,8 @@ func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 		10*time.Second,
 		&MockRegistrationAuthority{},
 		mockSA,
+		unpauseKey,
+		24*time.Hour,
 	)
 	test.AssertNotError(t, err, "Unable to create WFE")
 
@@ -149,4 +161,51 @@ func TestIndex(t *testing.T) {
 		test.AssertEquals(t, responseWriter.Body.String(), "404 page not found\n")
 		test.AssertEquals(t, responseWriter.Header().Get("Cache-Control"), "")
 	*/
+}
+
+// makeJWTForAccount is a standin for a WFE method that returns an unpauseJWT or
+// an error. The JWT contains a set of claims which should be validated by the
+// caller.
+func makeJWTForAccount(notBefore time.Time, issuedAt time.Time, expiresAt time.Time, key []byte, regID int64) (unpauseJWT, error) {
+	if key == nil {
+		return "", errors.New("Unable to create JWT")
+	}
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: key}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		return "", fmt.Errorf("making signer: %s", err)
+	}
+
+	wfeClaims := jwt.Claims{
+		Issuer:    "WFE",
+		Subject:   fmt.Sprint(regID),
+		Audience:  jwt.Audience{"SFE Unpause"},
+		NotBefore: jwt.NewNumericDate(notBefore),
+		IssuedAt:  jwt.NewNumericDate(issuedAt),
+		Expiry:    jwt.NewNumericDate(expiresAt),
+	}
+
+	signedJWT, err := jwt.Signed(signer).Claims(wfeClaims).Serialize()
+	if err != nil {
+		return "", fmt.Errorf("signed JWT: %s", err)
+	}
+
+	return unpauseJWT(signedJWT), nil
+}
+
+func TestValidateJWT(t *testing.T) {
+	sfe, fc := setupSFE(t)
+	account := int64(1)
+
+	now := fc.Now()
+	issuedAt := now
+	notBefore := now.Add(5 * time.Minute) // We want the client to wait some arbitrary time before redeeming the link.
+	expiresAt := now.Add(30 * time.Minute)
+	newJWT, err := makeJWTForAccount(notBefore, issuedAt, expiresAt, []byte(sfe.unpauseKey), account)
+	test.AssertNotError(t, err, "Should have been able to create a JWT")
+	test.AssertNotEquals(t, newJWT, "")
+
+	fc.Add(10 * time.Minute)
+	err = sfe.validateJWTforAccount(newJWT, account)
+	test.AssertNotError(t, err, "Unable to validate JWT")
 }

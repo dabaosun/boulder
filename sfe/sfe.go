@@ -9,7 +9,8 @@ import (
 	"text/template"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
+	//jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/jmhodges/clock"
 	"github.com/prometheus/client_golang/prometheus"
@@ -70,8 +71,9 @@ type SelfServiceFrontEndImpl struct {
 	// CORS settings
 	AllowOrigins []string
 
-	// unpauseKey is an HMAC-SHA256 key used for verifying the HMAC included in
-	// each unpause request.
+	// unpauseKey should contain 256 bits (32 bytes) of random data to be
+	// suitable as an HMAC-SHA256 key (e.g. the output of `openssl rand -hex
+	// 32`)
 	unpauseKey string
 
 	// unpauseStaleWindow is the amount of time an unpause URL is considered
@@ -90,6 +92,12 @@ func NewSelfServiceFrontEndImpl(
 	unpauseKey string,
 	unpauseStaleWindow time.Duration,
 ) (SelfServiceFrontEndImpl, error) {
+	// The SFE will be validating JWTs produced by the WFE which uses the HS256
+	// signing algorithm and must have at least as many bytes as the hash output
+	// of that algorithm.
+	if len(unpauseKey) < 32 {
+		return SelfServiceFrontEndImpl{}, errors.New("unpauseKey invalid size, should be at least 32 hexadecimal characters")
+	}
 
 	sfe := SelfServiceFrontEndImpl{
 		log:                logger,
@@ -290,15 +298,32 @@ func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, reques
 	}
 }
 
-// validateJWT takes an unpauseJWT and attempts to decrypt it and perform
-// several sanity checks before allowing the Subscriber to unpause their account
-// or returns an error.
-func (sfe *SelfServiceFrontEndImpl) validateJWT(incomingJWT unpauseJWT) error {
-	token, err := jose.ParseSigned(string(incomingJWT), []jose.SignatureAlgorithm{jose.ES256})
+// validateJWT takes an unpauseJWT and a registrationID and attempts to decrypt
+// it and perform several sanity checks before allowing the Subscriber to
+// unpause their account or returns an error.
+func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT, regID int64) error {
+	token, err := jwt.ParseSigned(string(incomingJWT), []jose.SignatureAlgorithm{jose.HS256})
 	if err != nil {
 		return fmt.Errorf("parsing JWT: %s", err)
 	}
 
-	out := jwt.Claims{}
+	incomingClaims := jwt.Claims{}
+	err = token.Claims([]byte(sfe.unpauseKey), &incomingClaims)
+	if err != nil {
+		return err
+	}
+
+	expectedClaims := jwt.Expected{
+		Issuer:      "WFE",
+		Subject:     fmt.Sprint(regID),
+		AnyAudience: jwt.Audience{"SFE Unpause"},
+		Time:        sfe.clk.Now(),
+	}
+
+	err = incomingClaims.Validate(expectedClaims)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

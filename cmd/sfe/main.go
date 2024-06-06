@@ -92,6 +92,11 @@ func setupSFE(c Config, scope prometheus.Registerer, clk clock.Clock) (rapb.Regi
 		if unpauseKey == "" {
 			cmd.Fail("unpauseKey must not be empty")
 		}
+		// The SFE will be validating JWTs produced by a signer using the HS256
+		// algorithm.
+		if len(unpauseKey) < 32 {
+			cmd.Fail("unpauseKey should be at least 32 hexadecimal characters e.g. the output of 'openssl rand -hex 32'")
+		}
 	}
 
 	tlsConfig, err := c.SFE.TLS.Load(scope)
