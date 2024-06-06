@@ -38,7 +38,6 @@ var (
 	tmplUnpausePost     *template.Template
 	tmplUnpauseParams   *template.Template
 	tmplUnpauseNoParams *template.Template
-	tmplUnpauseExpired  *template.Template
 )
 
 // Parse the files once at startup to avoid each request causing the server to
@@ -49,7 +48,6 @@ func init() {
 	tmplUnpausePost = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-post.html"))
 	tmplUnpauseParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-params.html"))
 	tmplUnpauseNoParams = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-noParams.html"))
-	tmplUnpauseExpired = template.Must(template.New("unpause").ParseFS(dynamicFS, "templates/layout.html", "pages/unpause-expired.html"))
 }
 
 var errIncompleteGRPCResponse = errors.New("incomplete gRPC response message")
@@ -75,10 +73,6 @@ type SelfServiceFrontEndImpl struct {
 	// suitable as an HMAC-SHA256 key (e.g. the output of `openssl rand -hex
 	// 32`)
 	unpauseKey string
-
-	// unpauseStaleWindow is the amount of time an unpause URL is considered
-	// "fresh" before returning an error to a client.
-	unpauseStaleWindow time.Duration
 }
 
 // NewSelfServiceFrontEndImpl constructs a web service for Boulder
@@ -90,7 +84,6 @@ func NewSelfServiceFrontEndImpl(
 	rac rapb.RegistrationAuthorityClient,
 	sac sapb.StorageAuthorityReadOnlyClient,
 	unpauseKey string,
-	unpauseStaleWindow time.Duration,
 ) (SelfServiceFrontEndImpl, error) {
 	// The SFE will be validating JWTs produced by the WFE which uses the HS256
 	// signing algorithm and must have at least as many bytes as the hash output
@@ -100,13 +93,12 @@ func NewSelfServiceFrontEndImpl(
 	}
 
 	sfe := SelfServiceFrontEndImpl{
-		log:                logger,
-		clk:                clk,
-		requestTimeout:     requestTimeout,
-		ra:                 rac,
-		sa:                 sac,
-		unpauseKey:         unpauseKey,
-		unpauseStaleWindow: unpauseStaleWindow,
+		log:            logger,
+		clk:            clk,
+		requestTimeout: requestTimeout,
+		ra:             rac,
+		sa:             sac,
+		unpauseKey:     unpauseKey,
 	}
 
 	return sfe, nil
@@ -259,11 +251,19 @@ type unpauseJWT string
 
 func (sfe *SelfServiceFrontEndImpl) getHelper(response http.ResponseWriter, incomingJWT unpauseJWT) {
 	if incomingJWT != "" {
+		data := struct {
+			UnpausePath string
+			JWT         string
+		}{
+			UnpausePath: unpausePath,
+			JWT:         string(incomingJWT),
+		}
+
 		// Serve the actual unpause page given to a Subscriber. Populates the
 		// unpause form with the JWT from the URL. That JWT itself may be
-		// invalid or expired, but that validation will be performed after
+		// invalid or expired, but that validation will be performed only after
 		// submitting the form.
-		renderTemplate(response, tmplUnpauseParams, nil)
+		renderTemplate(response, tmplUnpauseParams, data)
 	} else {
 		// We only want to accept requests containing the JWT param.
 		renderTemplate(response, tmplUnpauseNoParams, nil)
@@ -272,9 +272,20 @@ func (sfe *SelfServiceFrontEndImpl) getHelper(response http.ResponseWriter, inco
 
 func (sfe *SelfServiceFrontEndImpl) postHelper(response http.ResponseWriter, incomingJWT unpauseJWT) {
 	if incomingJWT != "" {
-		// After clicking unpause, serve another page indicating that the
-		// Subscriber should re-attempt issuance.
-		renderTemplate(response, tmplUnpausePost, nil)
+		data := struct {
+			ShouldUnpause bool
+		}{
+			ShouldUnpause: false,
+		}
+
+		// After clicking unpause, serve a page indicating if the unpause
+		// succeeded or failed.
+		err := sfe.validateJWTforAccount(incomingJWT)
+		if err == nil {
+			data.ShouldUnpause = true
+		}
+
+		renderTemplate(response, tmplUnpausePost, data)
 	} else {
 		renderTemplate(response, tmplUnpauseNoParams, nil)
 	}
@@ -298,10 +309,11 @@ func (sfe *SelfServiceFrontEndImpl) Unpause(response http.ResponseWriter, reques
 	}
 }
 
-// validateJWT takes an unpauseJWT and a registrationID and attempts to decrypt
-// it and perform several sanity checks before allowing the Subscriber to
-// unpause their account or returns an error.
-func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT, regID int64) error {
+// validateJWT uses a shared symmetric between the SFE and WFE to validate the
+// signature and contents of an unpauseJWT and verify that the its claims match
+// a set of expected claims. Passing validations allows the Subscriber to
+// unpause their account, otherwise an error is returned.
+func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT) error {
 	token, err := jwt.ParseSigned(string(incomingJWT), []jose.SignatureAlgorithm{jose.HS256})
 	if err != nil {
 		return fmt.Errorf("parsing JWT: %s", err)
@@ -315,9 +327,9 @@ func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT
 
 	expectedClaims := jwt.Expected{
 		Issuer:      "WFE",
-		Subject:     fmt.Sprint(regID),
 		AnyAudience: jwt.Audience{"SFE Unpause"},
-		Time:        sfe.clk.Now(),
+		// Time is passed into the jwt package for tests to manipulate time.
+		Time: sfe.clk.Now(),
 	}
 
 	err = incomingClaims.Validate(expectedClaims)
@@ -325,10 +337,8 @@ func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT
 		return err
 	}
 
-	jwtIssuedAt := incomingClaims.IssuedAt.Time()
-	elapsedTime := sfe.clk.Now().Sub(jwtIssuedAt)
-	if elapsedTime > sfe.unpauseStaleWindow {
-		return fmt.Errorf("JWT is older than allowed window of %v", sfe.unpauseStaleWindow)
+	if len(incomingClaims.Subject) == 0 {
+		return errors.New("Registration ID required for account unpausing")
 	}
 
 	return nil

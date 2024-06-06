@@ -10,8 +10,7 @@
 		"unpause": {
 			"key": {
 				"passwordFile": "test/secrets/sfe_unpause_secret_key"
-			},
-			"staleWindow": "72h"
+			}
 		},
 		"tls": {
 			"caCertFile": "test/certs/ipki/minica.pem",

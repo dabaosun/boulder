@@ -62,10 +62,6 @@ type Config struct {
 			// multi-DC deployment this value should be the same across all
 			// boulder-wfe and sfe instances.
 			Key cmd.PasswordConfig `validate:"-"`
-
-			// StaleWindow is the amount of time an unpause URL is considered
-			// "fresh" before returning an error to a client.
-			StaleWindow config.Duration `validate:"-"`
 		}
 
 		Features features.Config
@@ -174,7 +170,6 @@ func main() {
 		rac,
 		sac,
 		unpauseKey,
-		c.SFE.Unpause.StaleWindow.Duration,
 	)
 	cmd.FailOnError(err, "Unable to create SFE")
 	sfei.AllowOrigins = c.SFE.AllowOrigins
