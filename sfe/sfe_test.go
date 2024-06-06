@@ -136,6 +136,7 @@ func setupSFE(t *testing.T) (SelfServiceFrontEndImpl, clock.FakeClock) {
 }
 
 func TestIndex(t *testing.T) {
+	t.Parallel()
 	sfe, _ := setupSFE(t)
 	responseWriter := httptest.NewRecorder()
 	url, _ := url.Parse("/")
@@ -168,7 +169,7 @@ func TestIndex(t *testing.T) {
 // caller.
 func makeJWTForAccount(notBefore time.Time, issuedAt time.Time, expiresAt time.Time, key []byte, regID int64) (unpauseJWT, error) {
 	if key == nil {
-		return "", errors.New("Unable to create JWT")
+		return "", errors.New("unable to create JWT")
 	}
 
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: key}, (&jose.SignerOptions{}).WithType("JWT"))
@@ -185,27 +186,102 @@ func makeJWTForAccount(notBefore time.Time, issuedAt time.Time, expiresAt time.T
 		Expiry:    jwt.NewNumericDate(expiresAt),
 	}
 
-	signedJWT, err := jwt.Signed(signer).Claims(wfeClaims).Serialize()
+	signedJWT, err := jwt.Signed(signer).Claims(&wfeClaims).Serialize()
 	if err != nil {
-		return "", fmt.Errorf("signed JWT: %s", err)
+		return "", fmt.Errorf("signing JWT: %s", err)
 	}
 
 	return unpauseJWT(signedJWT), nil
 }
 
 func TestValidateJWT(t *testing.T) {
+	t.Parallel()
 	sfe, fc := setupSFE(t)
-	account := int64(1)
 
-	now := fc.Now()
-	issuedAt := now
-	notBefore := now.Add(5 * time.Minute) // We want the client to wait some arbitrary time before redeeming the link.
-	expiresAt := now.Add(30 * time.Minute)
-	newJWT, err := makeJWTForAccount(notBefore, issuedAt, expiresAt, []byte(sfe.unpauseKey), account)
-	test.AssertNotError(t, err, "Should have been able to create a JWT")
-	test.AssertNotEquals(t, newJWT, "")
+	originalClock := fc
+	testCases := []struct {
+		Name                   string
+		IssuedAt               time.Time
+		NotBefore              time.Time
+		ExpiresAt              time.Time
+		UnpauseKey             string
+		RegID                  int64
+		MakeJWTShouldError     bool
+		ValidateJWTShouldError bool
+	}{
+		{
+			Name:       "valid",
+			IssuedAt:   fc.Now(),
+			NotBefore:  fc.Now().Add(5 * time.Minute),
+			ExpiresAt:  fc.Now().Add(30 * time.Minute),
+			UnpauseKey: unpauseKey,
+			RegID:      1,
+		},
+		{
+			Name:                   "validating expired JWT fails",
+			IssuedAt:               fc.Now(),
+			NotBefore:              fc.Now().Add(5 * time.Minute),
+			ExpiresAt:              fc.Now().Add(-30 * time.Minute),
+			UnpauseKey:             unpauseKey,
+			RegID:                  1,
+			ValidateJWTShouldError: true,
+		},
+		{
+			Name:                   "validating wrong account ID fails",
+			IssuedAt:               fc.Now(),
+			NotBefore:              fc.Now().Add(5 * time.Minute),
+			ExpiresAt:              fc.Now().Add(30 * time.Minute),
+			UnpauseKey:             unpauseKey,
+			RegID:                  2,
+			ValidateJWTShouldError: true,
+		},
+		{
+			Name:                   "validating JWT with different key fails",
+			IssuedAt:               fc.Now(),
+			NotBefore:              fc.Now().Add(5 * time.Minute),
+			ExpiresAt:              fc.Now().Add(30 * time.Minute),
+			UnpauseKey:             "xxxxxxxxxxyyyyyyyyyyzzzzzzzzzz12",
+			RegID:                  1,
+			ValidateJWTShouldError: true,
+		},
+		{
+			Name:                   "creating JWT with empty key fails",
+			IssuedAt:               fc.Now(),
+			NotBefore:              fc.Now().Add(5 * time.Minute),
+			ExpiresAt:              fc.Now().Add(30 * time.Minute),
+			UnpauseKey:             "",
+			RegID:                  1,
+			MakeJWTShouldError:     true,
+			ValidateJWTShouldError: true,
+		},
+		{
+			Name:                   "creating JWT with invalid key size fails",
+			IssuedAt:               fc.Now(),
+			NotBefore:              fc.Now().Add(5 * time.Minute),
+			ExpiresAt:              fc.Now().Add(30 * time.Minute),
+			UnpauseKey:             "xxxxxxxxxx",
+			RegID:                  1,
+			MakeJWTShouldError:     true,
+			ValidateJWTShouldError: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			fc = originalClock
+			newJWT, err := makeJWTForAccount(tc.NotBefore, tc.IssuedAt, tc.ExpiresAt, []byte(tc.UnpauseKey), int64(1))
+			if tc.MakeJWTShouldError || string(newJWT) == "" {
+				test.AssertError(t, err, "JWT was created but should not have been")
+			} else {
+				test.AssertNotError(t, err, "Should have been able to create a JWT")
+			}
 
-	fc.Add(10 * time.Minute)
-	err = sfe.validateJWTforAccount(newJWT, account)
-	test.AssertNotError(t, err, "Unable to validate JWT")
+			fc.Add(10 * time.Minute)
+			err = sfe.validateJWTforAccount(newJWT, tc.RegID)
+			if tc.ValidateJWTShouldError || string(newJWT) == "" {
+				test.AssertError(t, err, "Error expected, but received none")
+			} else {
+				test.AssertNotError(t, err, "Unable to validate JWT")
+			}
+		})
+	}
 }
