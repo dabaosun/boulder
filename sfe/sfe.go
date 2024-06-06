@@ -325,5 +325,11 @@ func (sfe *SelfServiceFrontEndImpl) validateJWTforAccount(incomingJWT unpauseJWT
 		return err
 	}
 
+	jwtIssuedAt := incomingClaims.IssuedAt.Time()
+	elapsedTime := sfe.clk.Now().Sub(jwtIssuedAt)
+	if elapsedTime > sfe.unpauseStaleWindow {
+		return fmt.Errorf("JWT is older than allowed window of %v", sfe.unpauseStaleWindow)
+	}
+
 	return nil
 }

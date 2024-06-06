@@ -218,6 +218,15 @@ func TestValidateJWT(t *testing.T) {
 			RegID:      1,
 		},
 		{
+			Name:                   "JWT falls out of allowable window",
+			IssuedAt:               fc.Now().Add(-24 * time.Hour),
+			NotBefore:              fc.Now().Add(-24 * time.Hour),
+			ExpiresAt:              fc.Now().Add(24 * time.Hour),
+			UnpauseKey:             unpauseKey,
+			RegID:                  1,
+			ValidateJWTShouldError: true,
+		},
+		{
 			Name:                   "validating expired JWT fails",
 			IssuedAt:               fc.Now(),
 			NotBefore:              fc.Now().Add(5 * time.Minute),
